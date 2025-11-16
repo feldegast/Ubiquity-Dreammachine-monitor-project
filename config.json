@@ -1,0 +1,11 @@
+{
+  "copy_limit_rows": 200,
+  "debug_log_tail_lines": 200,
+  "enable_conntrack_ssh": true,
+  "enable_netflow_v5_collector": false,
+  "enable_toasts": false,
+  "poll_interval_seconds": 5,
+  "resolve_rdns": true,
+  "router_ip": "192.168.1.1",
+  "show_idle_devices": true
+}

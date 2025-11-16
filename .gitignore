@@ -1,0 +1,161 @@
+SNMP monitor project 2025-11-14-22-43.zip
+SNMP monitor project 2025-11-14-23-00.zip
+SNMP monitor project 2025-11-14-23-33.zip
+__pycache__/vendor_resolver.cpython-312.pyc
+__pycache__/vendors_offline.cpython-312.pyc
+Archives/SNMP monitor project - 2025-11-13-03-00.zip
+Archives/SNMP monitor project - migration partial.zip
+Archives/SNMP monitor project 1.0.rar
+Archives/SNMP monitor project 1.01.3.zip
+Archives/SNMP monitor project 2 20251105 1645.zip
+Archives/SNMP monitor project 2.0.zip
+Archives/SNMP monitor project 2.1.zip
+Archives/SNMP monitor project 2025-11-01-16-00.zip
+Archives/SNMP monitor project 2025-11-01-17-00.zip
+Archives/SNMP monitor project 2025-11-01-17-50.zip
+Archives/SNMP monitor project 2025-11-01-20-50.zip
+Archives/SNMP monitor project 2025-11-01-21-23.zip
+Archives/SNMP monitor project 2025-11-01-22-42.zip
+Archives/SNMP monitor project 2025-11-01-23-50.zip
+Archives/SNMP monitor project 2025-11-02-04-17.zip
+Archives/SNMP monitor project 2025-11-10-23-24.zip
+Archives/SNMP monitor project 2025-11-11-00-07.zip
+Archives/SNMP monitor project 2025-11-14-03-20.zip
+Archives/SNMP monitor project 20251105 1930.zip
+Archives/SNMP monitor project latest code after 1.0 but before the latest 2.0 code.zip
+Archives/SNMP monitor project old 2025-11-10 broken.zip
+Archives/SNMP monitor project.zip
+Archives/SNMP_Monitor - 225-11-10-7-45.py
+Archives/old broken/__init__.py
+Archives/old broken/alerts_log.csv
+Archives/old broken/app.py
+Archives/old broken/main.py
+Archives/old broken/main.py.old
+Archives/old broken/snapshot_20251029_220356.csv
+Archives/old broken/ssh_secrets.json
+Archives/old broken/test.py
+Archives/old broken/traffic_log.csv
+Archives/old broken/vendor_db.py
+Archives/old broken/__pycache__/vendor_db.cpython-312.pyc
+Archives/old broken/config/__init__.py
+Archives/old broken/config/settings.py
+Archives/old broken/config/settings.py.bak
+Archives/old broken/config/__pycache__/__init__.cpython-312.pyc
+Archives/old broken/config/__pycache__/settings.cpython-312.pyc
+Archives/old broken/constants/config
+Archives/old broken/core/__init__.py
+Archives/old broken/core/monitor_core.py
+Archives/old broken/core/monitor.py
+Archives/old broken/core/row_prep.py
+Archives/old broken/core/__pycache__/__init__.cpython-312.pyc
+Archives/old broken/core/__pycache__/monitor.cpython-312.pyc
+Archives/old broken/core/__pycache__/row_prep.cpython-312.pyc
+Archives/old broken/data/device_names.json
+Archives/old broken/engine/__init__.py
+Archives/old broken/engine/arp.py
+Archives/old broken/engine/collectors.py
+Archives/old broken/engine/device_names.py
+Archives/old broken/engine/init.py
+Archives/old broken/engine/snmp_backend.py
+Archives/old broken/engine/vendor_lookup.py
+Archives/old broken/engine/vendors.py
+Archives/old broken/engine/__pycache__/__init__.cpython-312.pyc
+Archives/old broken/engine/__pycache__/device_names.cpython-312.pyc
+Archives/old broken/resolvers/__init__.py
+Archives/old broken/resolvers/mac_resolvers.py
+Archives/old broken/resolvers/__pycache__/__init__.cpython-312.pyc
+Archives/old broken/resolvers/__pycache__/mac_resolvers.cpython-312.pyc
+Archives/old broken/snmp/__init__.py
+Archives/old broken/snmp/backend.py
+Archives/old broken/snmp/poller.py
+Archives/old broken/storage/__init__.py
+Archives/old broken/storage/traffic_log.py
+Archives/old broken/ui/__init__.py
+Archives/old broken/ui/app_ui.py
+Archives/old broken/ui/table_models.py
+Archives/old broken/ui/__pycache__/__init__.cpython-312.pyc
+Archives/old broken/ui/__pycache__/app_ui.cpython-312.pyc
+Archives/old broken/ui/__pycache__/table_models.cpython-312.pyc
+Archives/old broken/utils/__init__.py
+Archives/old broken/utils/clipboard.py
+Archives/old broken/utils/common.py
+Archives/old broken/utils/mac_utils.py
+Archives/old broken/utils/mac.py
+Archives/old broken/utils/timefmt.py
+Archives/old broken/utils/vendors.py
+Archives/old broken/utils/__pycache__/__init__.cpython-312.pyc
+Archives/old broken/utils/__pycache__/common.cpython-312.pyc
+Archives/old broken/utils/__pycache__/mac_utils.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-02-04-17/alerts_log.csv
+Archives/SNMP monitor project 2025-11-02-04-17/app.py
+Archives/SNMP monitor project 2025-11-02-04-17/snapshot_20251029_220356.csv
+Archives/SNMP monitor project 2025-11-02-04-17/SNMP_Monitor.py
+Archives/SNMP monitor project 2025-11-02-04-17/ssh_secrets.json
+Archives/SNMP monitor project 2025-11-02-04-17/test.py
+Archives/SNMP monitor project 2025-11-02-04-17/traffic_log.csv
+Archives/SNMP monitor project 2025-11-02-04-17/constants/config
+Archives/SNMP monitor project 2025-11-02-04-17/core/monitor.py
+Archives/SNMP monitor project 2025-11-02-04-17/data/device_names.json
+Archives/SNMP monitor project 2025-11-02-04-17/engine/__init__.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/arp.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/collectors.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/device_names.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/init.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/snmp_backend.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/vendor_lookup.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/vendors.py
+Archives/SNMP monitor project 2025-11-02-04-17/engine/__pycache__/__init__.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-02-04-17/engine/__pycache__/device_names.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-02-04-17/engine/__pycache__/vendors.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-02-04-17/resolvers/mac_resolvers.py
+Archives/SNMP monitor project 2025-11-02-04-17/resolvers/__pycache__/mac_resolvers.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-02-04-17/snmp/__init__.py
+Archives/SNMP monitor project 2025-11-02-04-17/snmp/poller.py
+Archives/SNMP monitor project 2025-11-02-04-17/storage/__init__.py
+Archives/SNMP monitor project 2025-11-02-04-17/storage/traffic_log.py
+Archives/SNMP monitor project 2025-11-02-04-17/ui/__init__.py
+Archives/SNMP monitor project 2025-11-02-04-17/ui/app_ui.py
+Archives/SNMP monitor project 2025-11-02-04-17/ui/table_models.py
+Archives/SNMP monitor project 2025-11-02-04-17/utils/vendors.py
+Archives/SNMP monitor project 2025-11-09-17-43/alerts_log.csv
+Archives/SNMP monitor project 2025-11-09-17-43/app.py
+Archives/SNMP monitor project 2025-11-09-17-43/snapshot_20251029_220356.csv
+Archives/SNMP monitor project 2025-11-09-17-43/SNMP_Monitor.py
+Archives/SNMP monitor project 2025-11-09-17-43/SNMP_Monitor.py.old
+Archives/SNMP monitor project 2025-11-09-17-43/ssh_secrets.json
+Archives/SNMP monitor project 2025-11-09-17-43/test.py
+Archives/SNMP monitor project 2025-11-09-17-43/traffic_log.csv
+Archives/SNMP monitor project 2025-11-09-17-43/vendor_db.py
+Archives/SNMP monitor project 2025-11-09-17-43/__pycache__/vendor_db.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-09-17-43/constants/config
+Archives/SNMP monitor project 2025-11-09-17-43/core/monitor.py
+Archives/SNMP monitor project 2025-11-09-17-43/core/row_prep.py
+Archives/SNMP monitor project 2025-11-09-17-43/core/__pycache__/row_prep.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-09-17-43/data/device_names.json
+Archives/SNMP monitor project 2025-11-09-17-43/engine/__init__.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/arp.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/collectors.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/device_names.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/init.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/snmp_backend.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/vendor_lookup.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/vendors.py
+Archives/SNMP monitor project 2025-11-09-17-43/engine/__pycache__/__init__.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-09-17-43/engine/__pycache__/device_names.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-09-17-43/resolvers/mac_resolvers.py
+Archives/SNMP monitor project 2025-11-09-17-43/resolvers/__pycache__/mac_resolvers.cpython-312.pyc
+Archives/SNMP monitor project 2025-11-09-17-43/snmp/__init__.py
+Archives/SNMP monitor project 2025-11-09-17-43/snmp/poller.py
+Archives/SNMP monitor project 2025-11-09-17-43/storage/__init__.py
+Archives/SNMP monitor project 2025-11-09-17-43/storage/traffic_log.py
+Archives/SNMP monitor project 2025-11-09-17-43/ui/__init__.py
+Archives/SNMP monitor project 2025-11-09-17-43/ui/app_ui.py
+Archives/SNMP monitor project 2025-11-09-17-43/ui/table_models.py
+Archives/SNMP monitor project 2025-11-09-17-43/utils/common.py
+Archives/SNMP monitor project 2025-11-09-17-43/utils/vendors.py
+Archives/SNMP monitor project 2025-11-09-17-43/utils/__pycache__/common.cpython-312.pyc
+ssh_secrets.json
+alerts_log.csv
+alerts_log.csv
+data/host_aliases.json
+traffic_log.csv
