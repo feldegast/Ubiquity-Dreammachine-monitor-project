@@ -17,14 +17,13 @@ import time
 from datetime import datetime
 
 import ipaddress
-import concurrent.futures
 
 from collections import defaultdict
 from importlib import import_module
 from pathlib import Path
 from typing import Iterable, Dict, Optional
 from vendor_resolver import vendor_for_display as lookup_vendor, update_vendor_db_now
-from vendors_offline import vendor_for_mac
+#from vendors_offline import vendor_for_mac
 
 # Optional offline fallback (does not hit network)
 try:
@@ -162,7 +161,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 HOST_ALIAS_PATH = (BASE_DIR / "data" / "host_aliases.json") if "BASE_DIR" in globals() else Path("data/host_aliases.json")
 HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
-VENDOR_PATH     = BASE_DIR / "data" / "mac-vendor.txt"
+VENDOR_PATH     = BASE_DIR / "data" / "mac-vendor-overrides.txt"
 
 #VENDOR_DB = VendorDB(base_dir=BASE_DIR)
 #DEVICE_NAMER = DeviceNamer(base_dir=BASE_DIR)
@@ -2342,75 +2341,134 @@ class App(tk.Tk):
         if mac:
             self._mac_labels[mac.upper()] = label or ""
 
-    def _get_alias_for_ip(self, ip: str) -> str:
-        if not ip:
-            return ""
-        d = getattr(self, "_host_aliases", None)
-        return (d or {}).get(ip, "")
+    def _edit_alias_for_ip(self, ip: str) -> None:
+        """Quick inline editor for a single IP alias, used when double-clicking a local IP."""
+        from tkinter import simpledialog as sd, messagebox as mb
 
-    def _set_alias_for_ip(self, ip: str, alias: str) -> None:
-        if not hasattr(self, "_host_aliases"):
-            self._host_aliases = {}
-        if ip:
-            self._host_aliases[ip] = alias or ""
+        ip = (ip or "").strip()
+        if not ip:
+            return
+
+        # Get current alias, if any
+        try:
+            current = _HOSTNAMES.name_for_ip(ip) or ""
+        except Exception:
+            current = ""
+
+        name = sd.askstring(
+            "Hostname Alias",
+            f"IP: {ip}\nFriendly name:",
+            initialvalue=current,
+            parent=self,
+        )
+        if name is None:
+            return  # user cancelled
+
+        name = name.strip()
+
+        try:
+            # Empty -> clear alias
+            _HOSTNAMES.set_alias(ip, name or None)
+        except Exception:
+            mb.showerror("Error", f"Failed to update alias for {ip}", parent=self)
+            return
+
+        # Refresh any views that show Vendor/Host using _display_name(...)
+        try:
+            self._refresh_vendor_column_for_table(self.tree)
+        except Exception:
+            pass
+        try:
+            self._refresh_vendor_column_for_table(self.agg)
+        except Exception:
+            pass
+
 
     def _open_edit_dialog(self, mac_initial: str, ip_initial: str) -> tuple[str, str] | None:
-        """Simple modal to edit both MAC label and Hostname alias."""
+        """Modal dialog to edit a custom device label for a MAC address.
+
+        ip_initial is only used as context (shown read-only if present).
+        """
         import tkinter as tk
-        from tkinter import ttk, simpledialog
-    
+        from tkinter import ttk
+
         # Parent window
         win = tk.Toplevel(self)
-        win.title("Edit Labels")
+        win.title("Edit Device Label")
         win.transient(self)
         win.grab_set()
         win.resizable(False, False)
-    
-        # Current values
+
+        # Current custom label for this MAC (if any)
         cur_label = self._get_current_label_for_mac(mac_initial) if mac_initial else ""
-        cur_alias = self._get_alias_for_ip(ip_initial) if ip_initial else ""
-    
-        ttk.Label(win, text="MAC address:").grid(row=0, column=0, sticky="w", padx=8, pady=(8,2))
+
+        # --- Row 0: MAC address (read-only) ------------------------------------
+        ttk.Label(win, text="MAC address:").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(8, 2)
+        )
         mac_var = tk.StringVar(value=mac_initial or "")
-        ttk.Entry(win, textvariable=mac_var, width=28).grid(row=0, column=1, sticky="ew", padx=8, pady=(8,2))
-    
-        ttk.Label(win, text="Custom device label:").grid(row=1, column=0, sticky="w", padx=8, pady=2)
+        mac_entry = ttk.Entry(win, textvariable=mac_var, width=28, state="readonly")
+        mac_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 2))
+
+        # --- Row 1: Custom device label ----------------------------------------
+        ttk.Label(win, text="Custom device label:").grid(
+            row=1, column=0, sticky="w", padx=8, pady=2
+        )
         label_var = tk.StringVar(value=cur_label)
-        ttk.Entry(win, textvariable=label_var, width=28).grid(row=1, column=1, sticky="ew", padx=8, pady=2)
-    
-        ttk.Label(win, text="IP address:").grid(row=2, column=0, sticky="w", padx=8, pady=2)
-        ip_var = tk.StringVar(value=ip_initial or "")
-        ttk.Entry(win, textvariable=ip_var, width=28).grid(row=2, column=1, sticky="ew", padx=8, pady=2)
-    
-        ttk.Label(win, text="Hostname alias:").grid(row=3, column=0, sticky="w", padx=8, pady=2)
-        alias_var = tk.StringVar(value=cur_alias)
-        ttk.Entry(win, textvariable=alias_var, width=28).grid(row=3, column=1, sticky="ew", padx=8, pady=2)
-    
-        btnf = ttk.Frame(win); btnf.grid(row=4, column=0, columnspan=2, sticky="e", padx=8, pady=8)
-        result: list[str | None] = [None]
-    
+        ttk.Entry(win, textvariable=label_var, width=28).grid(
+            row=1, column=1, sticky="ew", padx=8, pady=2
+        )
+
+        # Optional context: show which IP this row came from
+        next_row = 2
+        if ip_initial:
+            ttk.Label(
+                win,
+                text=f"Seen at IP: {ip_initial}",
+            ).grid(row=next_row, column=0, columnspan=2,
+                   sticky="w", padx=8, pady=(4, 2))
+            next_row += 1
+
+        # Buttons
+        btnf = ttk.Frame(win)
+        btnf.grid(row=next_row, column=0, columnspan=2,
+                  sticky="e", padx=8, pady=8)
+
+        result: list[tuple[str, str] | None] = [None]
+
         def _ok():
-            # Save immediately
             mac = (mac_var.get() or "").strip()
             lbl = (label_var.get() or "").strip()
-            ip  = (ip_var.get() or "").strip()
-            alias = (alias_var.get() or "").strip()
+
             if mac:
                 self._set_label_for_mac(mac, lbl)
-            if ip:
-                self._set_alias_for_ip(ip, alias)
-            result[0] = (mac, ip)
+
+            # We keep the return type compatible: (mac, ip_initial)
+            result[0] = (mac, ip_initial or "")
             win.destroy()
-    
+
         def _cancel():
             result[0] = None
             win.destroy()
-    
-        ttk.Button(btnf, text="Cancel", command=_cancel).pack(side="right", padx=(8,0))
+
+        ttk.Button(btnf, text="Cancel", command=_cancel).pack(side="right", padx=(8, 0))
         ttk.Button(btnf, text="OK", command=_ok).pack(side="right")
-    
-        # Geometry
-        win.columnconfigure(1, weight=1)
+
+        # Center over parent
+        win.update_idletasks()
+        try:
+            parent_x = self.winfo_rootx()
+            parent_y = self.winfo_rooty()
+            parent_w = self.winfo_width()
+            parent_h = self.winfo_height()
+            w = win.winfo_width()
+            h = win.winfo_height()
+            x = parent_x + (parent_w - w) // 2
+            y = parent_y + (parent_h - h) // 2
+            win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
         win.wait_window()
         return result[0]
 
@@ -2447,109 +2505,101 @@ class App(tk.Tk):
 
     def _bind_edit_on_doubleclick(self, tv, mac_col="mac", vendor_col="vendor", local_col=None):
         """
-        Bind a double-click handler on a ttk.Treeview so that double-clicking
-        the MAC or Vendor/Host cell opens a single dialog to edit:
-          - custom device label for the MAC
-          - hostname alias for an IP (derived from local host:port, else dest)
+        Bind a double-click handler on a ttk.Treeview so that:
+          - double-clicking the MAC or Vendor/Host cell edits the custom label for that MAC
+          - double-clicking the local IP cell (if local_col given) edits the hostname alias for that IP
+
         After saving, it refreshes the vendor/host display for the current table.
         """
-        import tkinter as tk
-    
-        # Helper: parse 'host:port' -> 'host'
-        def _hp_to_ip(hp: str) -> str:
-            try:
-                return self._parse_ip_from_hostport(hp) if hasattr(self, "_parse_ip_from_hostport") else (hp.rsplit(":", 1)[0] if ":" in hp else hp)
-            except Exception:
-                return ""
-    
-        # Helper: pick the "best" IP to alias for this row
-        def _select_ip_for_row(row_values: dict[str, str]) -> str:
-            # Prefer local (host:port), otherwise try dest (host:port), else empty.
-            local_hp = row_values.get(local_col, "") if local_col else ""
-            if local_hp:
-                ip = _hp_to_ip(local_hp)
-                if ip:
-                    return ip
-            dest_hp = row_values.get("dest", "") or row_values.get("destination", "")
-            if dest_hp:
-                ip = _hp_to_ip(dest_hp)
-                if ip:
-                    return ip
+
+        def _select_ip_for_row(row_vals: dict[str, str]) -> str:
+            """Best-effort extraction of an IP address from a row dict.
+
+            For "local" / "remote" style columns we may see "ip:port", so we
+            split off the port if present.
+            """
+            # Prefer explicit local_col if provided
+            if local_col:
+                val = row_vals.get(local_col) or ""
+                if val:
+                    # e.g. "192.168.1.2:53596"
+                    return (val.split()[0].split(":")[0]).strip()
+
+            # Fall back to common column names if present
+            for col in ("local", "remote", "src", "dst"):
+                val = row_vals.get(col) or ""
+                if val:
+                    return (val.split()[0].split(":")[0]).strip()
+
             return ""
-    
-        # Helper: recompute and refresh the Vendor/Host column for all rows in this table
-        def _refresh_vendor_column_for_table():
-            cols = tv["columns"]
-            for iid in tv.get_children(""):
-                try:
-                    # Get row values we need
-                    mac_val = tv.set(iid, mac_col) if mac_col in cols else ""
-                    local_hp = tv.set(iid, local_col) if (local_col and local_col in cols) else ""
-                    local_ip = _hp_to_ip(local_hp) if local_hp else ""
-    
-                    # Compute display
-                    disp = None
-                    if hasattr(self, "_display_name"):
-                        # Your canonical display: uses (local_ip, mac)
-                        disp = self._display_name(local_ip, mac_val)
-                    if not disp:
-                        # Fallback to a saved MAC label if present; otherwise leave as-is
-                        if hasattr(self, "_get_current_label_for_mac"):
-                            maybe_label = self._get_current_label_for_mac(mac_val)
-                            if maybe_label:
-                                disp = maybe_label
-    
-                    if disp:
-                        tv.set(iid, vendor_col, disp)
-                except Exception:
-                    # Never let UI crash on one bad row
-                    pass
-    
-        def _on_dclick(event: tk.Event):
-            # Identify row/column
+
+        def _on_dclick(event):
+            region = tv.identify("region", event.x, event.y)
+            if region != "cell":
+                return
+
             row_iid = tv.identify_row(event.y)
             col_id = tv.identify_column(event.x)  # e.g. "#1", "#2", ...
             if not row_iid or not col_id:
                 return
-    
-            # Map #N -> column name
+
             try:
-                col_index = int(col_id.lstrip("#")) - 1
+                col_index = int(col_id.strip("#")) - 1
             except Exception:
                 return
-    
+
             cols = list(tv["columns"])
             if col_index < 0 or col_index >= len(cols):
                 return
             clicked_col = cols[col_index]
-    
-            # Only engage on MAC or Vendor/Host column
+
+            # If user double-clicked the local IP column, open alias editor for that IP
+            if local_col and clicked_col == local_col:
+                row_vals = {c: tv.set(row_iid, c) for c in cols}
+                ip_val = _select_ip_for_row(row_vals)
+                if ip_val and hasattr(self, "_edit_alias_for_ip"):
+                    try:
+                        self._edit_alias_for_ip(ip_val)
+                    except Exception:
+                        pass
+
+                # After alias change, refresh this table's Vendor/Host column
+                if hasattr(self, "_refresh_vendor_column_for_table"):
+                    try:
+                        self._refresh_vendor_column_for_table(tv)
+                    except Exception:
+                        pass
+                return
+
+            # Otherwise: only engage on MAC or Vendor/Host column (for MAC label editing)
             if clicked_col not in {mac_col, vendor_col}:
                 return
-    
+
             # Build a dict of row values for easy access
             row_vals = {c: tv.set(row_iid, c) for c in cols}
-    
+
             mac_val = row_vals.get(mac_col, "") or ""
             ip_val = _select_ip_for_row(row_vals)
-    
-            # Open the combined editor
+
+            # Open the MAC label editor dialog
             if hasattr(self, "_open_edit_dialog"):
                 try:
                     result = self._open_edit_dialog(mac_val, ip_val)
                 except Exception:
                     result = None
             else:
-                # If dialog helper missing, do nothing
                 result = None
-    
-            # If user saved, refresh vendor/host text for this table
-            if result is not None:
-                _refresh_vendor_column_for_table()
-    
-        # Bind (add="+": don't clobber any existing bindings)
-        tv.bind("<Double-1>", _on_dclick, add="+")
 
+            # After editing the MAC label, refresh vendor/host for this table
+            if hasattr(self, "_refresh_vendor_column_for_table"):
+                try:
+                    self._refresh_vendor_column_for_table(tv)
+                except Exception:
+                    pass
+
+        # Bind double-click to this Treeview
+        tv.bind("<Double-1>", _on_dclick, add="+")
+        
     def _compose_destination(self, ip_port: str | None, host: str | None = None) -> str:
         """Return 'IP [host]:port' if host present, else 'IP:port' or '-'."""
         if not ip_port:
@@ -2957,7 +3007,7 @@ class App(tk.Tk):
             all_macs = macs_from_arp | macs_from_aggs
     
             for mac in sorted(all_macs):
-                vendor = vendor_for_mac(mac) if mac else "Unknown"
+                vendor = lookup_vendor(mac) if mac else "Unknown"
                 dests = self.core.aggregates.get(mac, {})
     
                 if not dests:
@@ -3449,19 +3499,38 @@ class App(tk.Tk):
     # --- [UI|DEVICE NAME] _display_name ------------------------------------
     # Purpose: Option A – prefer hostname; fall back to vendor
     def _display_name(self, local_ip: str | None, mac: str | None) -> str:
+        """Human-friendly name for a device, used in Vendor/Host columns.
+
+        Priority:
+        1) Hostname alias for the IP (managed in the separate 'Manage Hostname Aliases…' dialog)
+        2) Custom device label for the MAC (set via this double-click popup)
+        3) Vendor name for the MAC
+        4) "Unknown"
+        """
+        # 1) IP alias (from host_aliases.json via _HOSTNAMES)
         try:
-            # prefer alias/rDNS for the LAN device (local_ip)
             if local_ip:
                 host = _HOSTNAMES.name_for_ip(local_ip)
                 if host:
                     return host
         except Exception:
             pass
-        # else vendor for that MAC
+
+        # 2) Custom MAC label, if set via this dialog
+        try:
+            if mac and hasattr(self, "_get_current_label_for_mac"):
+                lbl = self._get_current_label_for_mac(mac)
+                if lbl:
+                    return lbl
+        except Exception:
+            pass
+
+        # 3) Fallback: vendor name
         try:
             return vendor_for_mac(mac) if mac else "Unknown"
         except Exception:
             return "Unknown"
+
 
     # --- [UI|DEBUG] _dump_neighbors_csv ------------------------------------
     def _dump_neighbors_csv(self):
@@ -3543,7 +3612,7 @@ def _candidate_vendor_files() -> list[Path]:
     here = Path(__file__).resolve().parent
     return [
         here / "mac-vendor.txt",
-        here / "data" / "mac-vendor.txt",
+        here / "data" / "mac-vendor-overrides.txt",
         Path.home() / ".cache" / "mac-vendor.txt",
     ]
 
@@ -3750,6 +3819,24 @@ _HOSTNAMES
 # _VENDOR.add_vendor_alias("B0:F7:C4", "Amazon Technologies Inc.")   # OUI alias
 # _VENDOR.add_vendor_alias("B0:F7:C4:DC:90:B5", "My Server (Amazon)") # full MAC alias
 # -------------------- end enhanced resolver --------------------
+
+# =============================================================================
+# SECTION: UNIFIED VENDOR RESOLUTION (override vendors_offline)
+# =============================================================================
+
+# Single shared resolver instance
+_VENDORS = _VendorResolver()
+
+def vendor_for_mac(mac: str | None) -> str:
+    """
+    Unified vendor lookup used by the whole app.
+
+    Order of precedence:
+      1) Full MAC / OUI aliases from your overrides files (data/mac-vendor-overrides.txt, etc.)
+      2) Base mac-vendor.txt (big OUI DB)
+      3) Fallback: Unknown, with special handling for randomized MACs
+    """
+    return _VENDORS.vendor_for_mac(mac or "")
 
 # =============================================================================
 # SECTION: ENTRY POINT (main guard)

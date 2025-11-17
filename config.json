@@ -5,7 +5,7 @@
   "enable_netflow_v5_collector": false,
   "enable_toasts": false,
   "poll_interval_seconds": 5,
-  "resolve_rdns": true,
+  "resolve_rdns": false,
   "router_ip": "192.168.1.1",
   "show_idle_devices": true
 }
