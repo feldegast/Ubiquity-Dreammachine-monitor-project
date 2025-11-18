@@ -169,44 +169,6 @@ HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
 MAC_LABELS_PATH = DATA_DIR / "mac_labels.json" # was mac-vendor-overrides.txt before changed to JSON
 MAC_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-def load_mac_labels() -> dict[str, str]:
-    """Load MAC → label mappings from data/mac_labels.json."""
-    labels: dict[str, str] = {}
-    path = MAC_LABELS_PATH
-
-    if not path.is_file():
-        return labels
-
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            for k, v in data.items():
-                if not k:
-                    continue
-                mac = str(k).strip().upper()
-                # Store empty-string labels as "no label"
-                labels[mac] = "" if v is None else str(v)
-    except Exception:
-        # Stay resilient if file is malformed
-        pass
-
-    return labels
-
-
-def save_mac_labels(labels: dict[str, str]) -> None:
-    """Persist MAC → label mappings back to data/mac_labels.json."""
-    path = MAC_LABELS_PATH
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Optionally drop empty labels from disk to keep the file tidy
-        clean = {k: v for k, v in labels.items() if v}
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(clean, f, indent=2, sort_keys=True)
-    except Exception:
-        # Fail silently – UI should keep working even if write fails
-        pass
-
 #VENDOR_DB = VendorDB(base_dir=BASE_DIR)
 #DEVICE_NAMER = DeviceNamer(base_dir=BASE_DIR)
 # endregion ENRICHMENT
@@ -254,15 +216,97 @@ except Exception:
 # Normalize MAC to "AA:BB:CC:DD:EE:FF"
 _MAC_RE = re.compile(r"[0-9A-Fa-f]{2}")
 
-# --- [] _normalize_mac
+# --- [] load_mac_labels ------------------------------------
+def load_mac_labels() -> dict[str, str]:
+    """
+    Load MAC → label mappings from disk.
+
+    Reads data from ``data/mac_labels.json`` (if present) and returns a mapping
+    of normalized MAC addresses (``AA:BB:CC:DD:EE:FF``) to user-defined labels.
+
+    The file format is a simple JSON object:
+
+        {
+          "AA:BB:CC:DD:EE:FF": "Lee's PC",
+          "11:22:33:44:55:66": "NAS"
+        }
+
+    Any malformed or missing file is treated as "no labels" and returns an empty
+    dict. This function never raises on I/O errors.
+    """
+    labels: dict[str, str] = {}
+    path = MAC_LABELS_PATH
+
+    if not path.is_file():
+        return labels
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if not k:
+                    continue
+                mac = str(k).strip().upper()
+                # Store empty-string labels as "no label"
+                labels[mac] = "" if v is None else str(v)
+    except Exception:
+        # Stay resilient if file is malformed
+        pass
+
+    return labels
+
+# --- [] save_mac_labels ------------------------------------
+def save_mac_labels(labels: dict[str, str]) -> None:
+    """
+    Persist MAC → label mappings to disk.
+
+    Writes the provided mapping to ``data/mac_labels.json``. Empty labels are
+    pruned so the file only contains actively named devices. Any errors are
+    swallowed so the UI keeps running even if disk writes fail.
+
+    Parameters
+    ----------
+    labels : dict[str, str]
+        Mapping of normalized MAC addresses to user-defined labels.
+    """
+    path = MAC_LABELS_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Optionally drop empty labels from disk to keep the file tidy
+        clean = {k: v for k, v in labels.items() if v}
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(clean, f, indent=2, sort_keys=True)
+    except Exception:
+        # Fail silently – UI should keep working even if write fails
+        pass
+    
+# --- [] _normalize_mac ----------------------------------------
 def _normalize_mac(mac: str) -> str:
+    """
+    Normalize a MAC address into ``AA:BB:CC:DD:EE:FF`` form.
+
+    Any hyphens are replaced with colons, and plain 12-hex strings are split
+    into pairs. Zero/empty MACs (e.g. ``00:00:00:00:00:00``) are returned as
+    an empty string.
+
+    Parameters
+    ----------
+    mac : Any
+        Raw MAC value from SNMP/NetFlow/conntrack (bytes, string, etc).
+
+    Returns
+    -------
+    str
+        Normalized MAC string or ``""`` if the value is empty/invalid.
+    """
     if not mac:
         return ""
     parts = _MAC_RE.findall(mac)
     parts = [p.upper() for p in parts[:6]]
     return ":".join(parts) if len(parts) == 6 else ""
 
-# --- [] _norm_mac
+# --- [] _norm_mac ----------------------------------------
 def _norm_mac(mac: str) -> str:
     if not mac:
         return ""
@@ -273,7 +317,7 @@ def _norm_mac(mac: str) -> str:
         parts = parts[:6]
     return ":".join(parts)
 
-# --- [] _mac_oui
+# --- [] _mac_oui ----------------------------------------
 def _mac_oui(mac: str) -> str:
     mac_norm = _norm_mac(mac)
     parts = mac_norm.split(":")
@@ -288,7 +332,7 @@ class _HostnameResolver:
     Precedence: alias > rDNS > ''.
     Thread-safe via a single RLock.
     """
-    # __init__
+    # --- [] __init__  ------------------------------------
     def __init__(self, alias_path: Path):
         import threading, json
         self._alias_path = Path(alias_path)
@@ -299,7 +343,7 @@ class _HostnameResolver:
         self._load_aliases()  # load once on init
 
     # ---------- persistence ----------
-    # _load_aliases
+    # --- [] _load_aliases  ------------------------------------
     def _load_aliases(self) -> None:
         try:
             if self._alias_path.exists():
@@ -313,7 +357,7 @@ class _HostnameResolver:
             # don't crash UI if file is malformed
             pass
 
-    # _save_aliases
+    # --- [] _save_aliases  ------------------------------------
     def _save_aliases(self) -> None:
         # call only while holding self._lock
         try:
@@ -324,12 +368,12 @@ class _HostnameResolver:
             pass
 
     # ---------- public API ----------
-    # aliases
+    # --- [] aliases ------------------------------------
     def aliases(self) -> dict[str, str]:
         with self._lock:
             return dict(self._aliases)
         
-    # set_alias
+    # --- [] set_alias  ------------------------------------
     def set_alias(self, ip: str, name: str | None) -> None:
         ip = (ip or "").strip()
         with self._lock:
@@ -339,13 +383,13 @@ class _HostnameResolver:
                 self._aliases.pop(ip, None)
         self._save_aliases()
 
-    # clear_cache
+    # --- [] clear_cache  ------------------------------------
     def clear_cache(self) -> None:
         """Clear rDNS cache, keep aliases."""
         with self._lock:
             self._rdns_cache.clear()
 
-    # _ip_from_hostport
+    # --- [] _ip_from_hostport ------------------------------------
     @staticmethod
     def _ip_from_hostport(local_hostport: str) -> str:
         # "A.B.C.D:port" -> "A.B.C.D"
@@ -355,7 +399,7 @@ class _HostnameResolver:
         parts = s.rsplit(":", 1)
         return parts[0] if parts else s
 
-    # name_for_ip
+    # --- [] name_for_ip ------------------------------------
     def name_for_ip(self, ip: str) -> str:
         """Return alias if set, else cached rDNS, else ''. Non-blocking."""
         with self._lock:
@@ -363,7 +407,7 @@ class _HostnameResolver:
                 return self._aliases[ip]
             return self._rdns_cache.get(ip, "")
 
-    # put_rdns
+    # --- [] put_rdns ------------------------------------
     def put_rdns(self, ip: str, hostname: str) -> None:
         with self._lock:
             # don't override alias
@@ -426,6 +470,7 @@ def _load_ssh_secrets(path: str):
         pass
     return cfg
 
+# --- [] _save_ssh_secrets ------------------------------------
 def _save_ssh_secrets(path: str, data: dict):
     """Persist SSH credentials to JSON.
 
@@ -715,6 +760,7 @@ def _walk_at_mib():
         rows.append((ip, macs.get(ip, "00:00:00:00:00:00")))
     return rows
 
+# --- [] normalize_mac ------------------------------------
 def normalize_mac(mac) -> str:
     """Return normalized 'AA:BB:CC:DD:EE:FF' or '' for empties/zeros."""
     if mac is None:
@@ -728,6 +774,7 @@ def normalize_mac(mac) -> str:
         return ""
     return s
 
+# --- [] normalize_mac ------------------------------------
 def prepare_row_for_ui(row: dict) -> dict:
     """
     Ensure each UI row has normalized MAC + resolved vendor.
@@ -758,7 +805,6 @@ def prepare_row_for_ui(row: dict) -> dict:
         out["vendor"] = vendor
 
     return out
-
 
 # --- [] _merge_ip2mac_from_snmp ------------------------------------
 def _merge_ip2mac_from_snmp():
@@ -1415,6 +1461,7 @@ class MonitorCore:
     # =============================================================================
     # region AGGREGATION
 
+# --- [] normalize_mac ------------------------------------
     def normalize_mac(mac):
         if not mac: return None
         mac = str(mac).strip().upper().replace("-", ":")
@@ -1757,6 +1804,7 @@ class App(tk.Tk):
         except Exception:
             _TOASTER = None
 
+    # --- [] load_config ------------------------------------
     def load_config(self) -> dict:
         try:
             if CONFIG_FILE.exists():
@@ -1770,13 +1818,15 @@ class App(tk.Tk):
             pass
         return dict(_DEFAULT_CFG)
 
+    # --- [] notify ------------------------------------
     def notify(self, title, msg):
         if _TOASTER:
             try:
                 _TOASTER.show_toast(title, msg, threaded=True)
             except Exception:
                 pass
-            
+
+    # --- [] save_config ------------------------------------    
     def save_config(self,cfg: dict) -> None:
         try:
             with CONFIG_FILE.open("w", encoding="utf-8") as f:
@@ -1785,6 +1835,7 @@ class App(tk.Tk):
             # don't crash UI if disk write fails
             pass
 
+    # --- [UI|LAYOUT] _center_window ------------------------------------
     def _center_window(self, offset_y: int = -80):
         self.update_idletasks()
         w = self.winfo_width()
@@ -1888,6 +1939,7 @@ class App(tk.Tk):
 
         _refresh_tree()
 
+    # --- [UI|TREEVIEW] _make_treeview_sortable ------------------------------------
     def _make_treeview_sortable(self, tree, col_types=None):
         """
         Enable click-to-sort for a ttk.Treeview.
@@ -1958,6 +2010,7 @@ class App(tk.Tk):
         for c in cols:
             tree.heading(c, text=tree.heading(c, "text"), command=lambda cc=c: _sort_by(cc))
 
+    # --- [UI|DIALOG] _open_settings_dialog ------------------------------------
     def _open_settings_dialog(self):
         """Open a modal Settings dialog for core app options."""
         import tkinter as tk
@@ -2132,6 +2185,7 @@ class App(tk.Tk):
         ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="right", padx=(4, 0))
         ttk.Button(btns, text="OK", command=on_ok).pack(side="right")
 
+    # --- [UI|MENU] _build_menu ------------------------------------
     def _build_menu(self):
         import tkinter as tk
         menubar = tk.Menu(self)
@@ -2182,6 +2236,7 @@ class App(tk.Tk):
 
         self.config(menu=menubar)
 
+    # --- [UI|TREEVIEW] _ensure_headings ------------------------------------
     def _ensure_headings(self, tv, cols_tuple):
         # Keep columns, displaycolumns, and show in sync so headings never disappear
         tv["columns"] = cols_tuple
@@ -2432,7 +2487,7 @@ class App(tk.Tk):
 
 # --- [HELPERS|ALIAS/VENDOR LABELS] -----------------------------------------
 
-
+    # --- [] _apply_state_visibility ------------------------------------
     def _apply_state_visibility(self):
         """Hide/show the 'state' column (last col in Active). Hidden unless DEBUG."""
         show = bool(globals().get("DEBUG", False))
@@ -2444,6 +2499,7 @@ class App(tk.Tk):
             self.tree.heading(col, text="")
             self.tree.column(col, width=0, minwidth=0, stretch=False)
 
+    # --- [UI|TREEVIEW] _bind_edit_on_doubleclick ------------------------------------
     def _bind_edit_on_doubleclick(self, tv, mac_col="mac", vendor_col="vendor", local_col=None):
         """
         Bind a double-click handler on a ttk.Treeview so that:
@@ -2540,7 +2596,8 @@ class App(tk.Tk):
 
         # Bind double-click to this Treeview
         tv.bind("<Double-1>", _on_dclick, add="+")
-        
+
+    # --- [] _compose_destination ------------------------------------        
     def _compose_destination(self, ip_port: str | None, host: str | None = None) -> str:
         """Return 'IP [host]:port' if host present, else 'IP:port' or '-'."""
         if not ip_port:
@@ -2553,6 +2610,7 @@ class App(tk.Tk):
                 return f"{ip_port} [{host}]"
         return ip_port
 
+    # --- [] _edit_alias_for_ip ------------------------------------
     def _edit_alias_for_ip(self, ip: str) -> None:
         """Quick inline editor for a single IP alias, used when double-clicking a local IP."""
         from tkinter import simpledialog as sd, messagebox as mb
@@ -2595,6 +2653,7 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # --- [] _ensure_mac_labels_loaded ------------------------------------
     def _ensure_mac_labels_loaded(self) -> None:
         """Lazy-load MAC labels from disk into self._mac_labels once."""
         if getattr(self, "_mac_labels_loaded", False):
@@ -2605,6 +2664,7 @@ class App(tk.Tk):
             self._mac_labels = {}
         self._mac_labels_loaded = True
 
+    # --- [] _fmt_dest ------------------------------------
     def _fmt_dest(remote_ip: str, remote_port: int | str) -> str:
         # Use rDNS cache if present
         try:
@@ -2614,6 +2674,7 @@ class App(tk.Tk):
             host = None
         return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
 
+    # --- [] _get_current_label_for_mac ------------------------------------
     def _get_current_label_for_mac(self, mac: str) -> str:
         if not mac:
             return ""
@@ -2624,6 +2685,7 @@ class App(tk.Tk):
         d = getattr(self, "_mac_labels", None) or {}
         return d.get(mac.upper(), "")
 
+    # --- [] _open_edit_dialog ------------------------------------
     def _open_edit_dialog(self, mac_initial: str, ip_initial: str) -> tuple[str, str] | None:
         """Modal dialog to edit a custom device label for a MAC address.
 
@@ -2712,6 +2774,7 @@ class App(tk.Tk):
         win.wait_window()
         return result[0]
 
+    # --- [] _parse_ip_from_hostport ------------------------------------
     def _parse_ip_from_hostport(hp: str) -> str:
         # "a.b.c.d:pppp" -> "a.b.c.d"
         try:
@@ -2719,6 +2782,7 @@ class App(tk.Tk):
         except Exception:
             return ""
 
+    # --- [] _set_label_for_mac ------------------------------------
     def _set_label_for_mac(self, mac: str, label: str) -> None:
         """Set or clear a custom label for a MAC and persist to disk."""
         mac = (mac or "").strip().upper()
@@ -2749,6 +2813,7 @@ class App(tk.Tk):
             # Don't crash the UI if write fails
             pass
 
+    # --- [] _set_status ------------------------------------
     def _set_status(self, msg: str):
         """Safely update a status indicator if present; otherwise fall back."""
         try:
@@ -2780,6 +2845,7 @@ class App(tk.Tk):
         except Exception:
             print(str(msg))
 
+    # --- [UI|TREEVIEW] _setup_sorting ------------------------------------
     def _setup_sorting(self, tree: "ttk.Treeview", table_name: str, default_col: str | None = None, default_reverse: bool = False):
         """
         Make a treeview sortable by header click and remember the last choice.
@@ -2831,8 +2897,21 @@ class App(tk.Tk):
             self._sort_prefs[table_name] = (default_col, default_reverse)
             _do_sort(default_col)
 
+    # --- [UI|TREEVIEW] _reapply_sort_if_any ------------------------------------
     def _reapply_sort_if_any(self, table_name: str, tree: "ttk.Treeview"):
         """Reapply remembered sort after a refresh."""
+        """
+        Reapply the last chosen sort for a table, if one exists.
+
+        Used at the end of each UI refresh after rows have been reinserted.
+
+        Parameters
+        ----------
+        table_name : str
+            Key into ``self._sort_prefs`` ('alerts', 'active', 'agg').
+        tree : ttk.Treeview
+            The Treeview whose rows should be resorted.
+        """
         pref = getattr(self, "_sort_prefs", {}).get(table_name)
         if not pref:
             return
@@ -2897,6 +2976,7 @@ class App(tk.Tk):
             import sys
             sys.exit(0)
 
+    # --- [] _on_test_ssh --------------------------------------
     def _on_test_ssh(self):
         secrets = _load_ssh_secrets(SSH_SECRETS_FILE)
         host = UDM_SSH_HOST
@@ -2942,11 +3022,13 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("SSH Test", f"Unexpected error: {e}")
 
+    # --- [] _on_copy_unknown_vendors --------------------------------------
     def _on_copy_unknown_vendors(self, text: str) -> None:
         """Receives the CSV text of unknown OUIs and puts it on the clipboard."""
 
         self._copy_to_clipboard(text or "","Copied unknown OUI vendors to clipboard")
 
+    # --- [] _on_copy_unknown_vendors_menu --------------------------------------
     def _on_copy_unknown_vendors_menu(self):
         def _norm(mac: str) -> str:
             if not mac: return ""
@@ -2988,6 +3070,7 @@ class App(tk.Tk):
         lines = ["# OUI,count"] + [f"{k},{v}" for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
         self._copy_to_clipboard("\n".join(lines), "Unknown vendor OUIs copied.")
 
+    # --- [] _on_about --------------------------------------
     def _on_about(self):
         import tkinter.messagebox as mbox
         import platform
@@ -3007,6 +3090,7 @@ class App(tk.Tk):
           #  "SNMP Monitor\nVendor resolution via offline DB + local overrides.\n© You."
         )
 
+    # --- [] _toggle_rdns --------------------------------------
     def _toggle_rdns(self):
         # Flip the flag in memory
         new_val = not bool(self.cfg.get("resolve_rdns", True))
@@ -3021,7 +3105,8 @@ class App(tk.Tk):
     
         # Tell the user
         self._set_status(f"rDNS {'ON' if RESOLVE_RDNS else 'OFF'}")
-        
+
+    # --- [] _on_toggle_show_idle --------------------------------------
     def _on_toggle_show_idle(self) -> None:
         """Persist the 'Show idle devices' toggle to config.json."""
         self.cfg["show_idle_devices"] = bool(self.show_idle_var.get())
@@ -3241,6 +3326,7 @@ class App(tk.Tk):
         # schedule next refresh
         self.after(1000, self._refresh_ui)
 
+    # --- [UI|CONFIG] _toggle_conntrack_ssh ------------------------------------
     def _toggle_conntrack_ssh(self) -> None:
         """Toggle the 'enable_conntrack_ssh' setting and persist to config."""
         global ENABLE_CONNTRACK_SSH
@@ -3257,6 +3343,7 @@ class App(tk.Tk):
             "(may require restart to fully take effect)"
         )
 
+    # --- [UI|CONFIG] _toggle_netflow_v5 ------------------------------------
     def _toggle_netflow_v5(self) -> None:
         """Toggle the 'enable_netflow_v5_collector' setting and persist to config."""
         global ENABLE_NETFLOW_V5_COLLECTOR
@@ -3713,10 +3800,12 @@ class App(tk.Tk):
         ttk.Button(btns, text="Save", command=on_save).pack(side="right")
         dlg.wait_window(dlg)
 
+    # --- [UI|DNS] _on_clear_hostname_cache ------------------------------------
     def _on_clear_hostname_cache(self):
         _HOSTNAMES.clear_cache()
         self.status.set("Hostname cache cleared.")
 
+    # --- [UI|DNS] _on_refresh_rdns_selected ------------------------------------
     def _on_refresh_rdns_selected(self):
         """Force a reverse-DNS lookup for the selected row's remote IP (Active Connections)."""
         import queue as _q
@@ -3774,7 +3863,7 @@ class App(tk.Tk):
 
 # -------------------- Offline MAC → Vendor resolver (enhanced) --------------------
 
-
+# --- [] _candidate_vendor_files --------------------------------------        
 def _candidate_vendor_files() -> list[Path]:
     here = BASE_DIR
     return [
@@ -3783,6 +3872,7 @@ def _candidate_vendor_files() -> list[Path]:
         Path.home() / ".cache" / "mac-vendor.txt",
     ]
 
+# --- [] _normalize_oui_text -------------------------------------- 
 def _normalize_oui_text(s: str) -> str:
     s = s.strip().upper()
     hexonly = re.sub(r"[^0-9A-F]", "", s)
@@ -3791,6 +3881,7 @@ def _normalize_oui_text(s: str) -> str:
     hexonly = hexonly[:6]
     return ":".join([hexonly[i:i+2] for i in range(0, 6, 2)])
 
+# --- [] _parse_vendor_lines --------------------------------------
 def _parse_vendor_lines(lines: Iterable[str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for raw in lines:
@@ -3809,6 +3900,7 @@ def _parse_vendor_lines(lines: Iterable[str]) -> Dict[str, str]:
             out.setdefault(oui, vendor)
     return out
 
+# --- [] _is_locally_admin --------------------------------------
 def _is_locally_admin(mac: str) -> bool:
     """
     True if the MAC is locally administered (randomized) — i.e., U/L bit set.
@@ -3823,8 +3915,9 @@ def _is_locally_admin(mac: str) -> bool:
     except ValueError:
         return False
 
-
 class _VendorResolver:
+    
+    # --- [] __init__ --------------------------------------
     def __init__(self, files: Iterable[Path] = ()):
         self._map: Dict[str, str] = {}
         self._alias: Dict[str, str] = {}      # full MAC (17 chars) or OUI → vendor
@@ -3833,6 +3926,7 @@ class _VendorResolver:
         self._loaded_from: list[Path] = []
         self.reload(files)
 
+    # --- [] reload --------------------------------------
     def reload(self, files: Iterable[Path] = ()):
         self._map.clear()
         self._alias.clear()
@@ -3864,6 +3958,7 @@ class _VendorResolver:
         if oui:
             self._alias[oui] = vendor
 
+    # --- [] reload --------------------------------------
     def export_unknowns(self, path: Optional[Path] = None):
         """
         Write the most frequent unknown OUIs to a file for curation.
@@ -3876,6 +3971,7 @@ class _VendorResolver:
         except Exception:
             pass
 
+    # --- [] reload --------------------------------------
     def export_unknowns_text(self) -> str:
         if not getattr(self, "_unknown_ouis", None):
             return ""
@@ -3884,6 +3980,7 @@ class _VendorResolver:
                                                         key=lambda kv: kv[1], reverse=True)]
         return "\n".join(lines)
 
+    # --- [] reload --------------------------------------
     def export_unknown_macs_text(self) -> str:
         # optional: if you also track full unknown MACs
         s = getattr(self, "_unknown_macs", None)
@@ -3891,6 +3988,7 @@ class _VendorResolver:
             return ""
         return "\n".join(sorted(s))
 
+    # --- [] reload --------------------------------------
     def export_unknowns_to_clipboard(self, copier=None) -> bool:
         """
         Copies the OUI,count list to clipboard.
@@ -3919,6 +4017,7 @@ class _VendorResolver:
             print(f"[VENDOR] Clipboard export failed: {e}")
             return False
 
+    # --- [] reload --------------------------------------
     @staticmethod
     def _is_locally_admin_from_full(mac_full: str) -> bool:
         """Assumes 'AA:BB:CC:DD:EE:FF'. Checks the U/L (locally-admin) bit."""
