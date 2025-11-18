@@ -343,7 +343,7 @@ class _HostnameResolver:
         self._load_aliases()  # load once on init
 
     # ---------- persistence ----------
-    # --- [] _load_aliases  ------------------------------------
+    # --- [NET|UI] _load_aliases  ------------------------------------
     def _load_aliases(self) -> None:
         try:
             if self._alias_path.exists():
@@ -357,7 +357,7 @@ class _HostnameResolver:
             # don't crash UI if file is malformed
             pass
 
-    # --- [] _save_aliases  ------------------------------------
+    # --- [NET|UI] _save_aliases  ------------------------------------
     def _save_aliases(self) -> None:
         # call only while holding self._lock
         try:
@@ -368,12 +368,12 @@ class _HostnameResolver:
             pass
 
     # ---------- public API ----------
-    # --- [] aliases ------------------------------------
+    # --- [NET|UI] aliases ------------------------------------
     def aliases(self) -> dict[str, str]:
         with self._lock:
             return dict(self._aliases)
         
-    # --- [] set_alias  ------------------------------------
+    # --- [NET|UI] set_alias  ------------------------------------
     def set_alias(self, ip: str, name: str | None) -> None:
         ip = (ip or "").strip()
         with self._lock:
@@ -383,13 +383,13 @@ class _HostnameResolver:
                 self._aliases.pop(ip, None)
         self._save_aliases()
 
-    # --- [] clear_cache  ------------------------------------
+    # --- [NET] clear_cache  ------------------------------------
     def clear_cache(self) -> None:
         """Clear rDNS cache, keep aliases."""
         with self._lock:
             self._rdns_cache.clear()
 
-    # --- [] _ip_from_hostport ------------------------------------
+    # --- [NET] _ip_from_hostport ------------------------------------
     @staticmethod
     def _ip_from_hostport(local_hostport: str) -> str:
         # "A.B.C.D:port" -> "A.B.C.D"
@@ -399,7 +399,7 @@ class _HostnameResolver:
         parts = s.rsplit(":", 1)
         return parts[0] if parts else s
 
-    # --- [] name_for_ip ------------------------------------
+    # --- [NET] name_for_ip ------------------------------------
     def name_for_ip(self, ip: str) -> str:
         """Return alias if set, else cached rDNS, else ''. Non-blocking."""
         with self._lock:
@@ -407,7 +407,7 @@ class _HostnameResolver:
                 return self._aliases[ip]
             return self._rdns_cache.get(ip, "")
 
-    # --- [] put_rdns ------------------------------------
+    # --- [NET] put_rdns ------------------------------------
     def put_rdns(self, ip: str, hostname: str) -> None:
         with self._lock:
             # don't override alias
@@ -470,7 +470,7 @@ def _load_ssh_secrets(path: str):
         pass
     return cfg
 
-# --- [] _save_ssh_secrets ------------------------------------
+# --- [CONFIG] _save_ssh_secrets ------------------------------------
 def _save_ssh_secrets(path: str, data: dict):
     """Persist SSH credentials to JSON.
 
@@ -2969,6 +2969,7 @@ class App(tk.Tk):
         return f"{name} ({ip}):{port}" if name else f"{ip}:{port}"
 
     # --- Menu handlers ---
+    # --- [UI] _on_exit --------------------------------------
     def _on_exit(self):
         try:
             self.destroy()
@@ -2976,7 +2977,7 @@ class App(tk.Tk):
             import sys
             sys.exit(0)
 
-    # --- [] _on_test_ssh --------------------------------------
+    # --- [UI] _on_test_ssh --------------------------------------
     def _on_test_ssh(self):
         secrets = _load_ssh_secrets(SSH_SECRETS_FILE)
         host = UDM_SSH_HOST
@@ -3022,13 +3023,13 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("SSH Test", f"Unexpected error: {e}")
 
-    # --- [] _on_copy_unknown_vendors --------------------------------------
+    # --- [UI] _on_copy_unknown_vendors --------------------------------------
     def _on_copy_unknown_vendors(self, text: str) -> None:
         """Receives the CSV text of unknown OUIs and puts it on the clipboard."""
 
         self._copy_to_clipboard(text or "","Copied unknown OUI vendors to clipboard")
 
-    # --- [] _on_copy_unknown_vendors_menu --------------------------------------
+    # --- [UI] _on_copy_unknown_vendors_menu --------------------------------------
     def _on_copy_unknown_vendors_menu(self):
         def _norm(mac: str) -> str:
             if not mac: return ""
@@ -3070,7 +3071,7 @@ class App(tk.Tk):
         lines = ["# OUI,count"] + [f"{k},{v}" for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
         self._copy_to_clipboard("\n".join(lines), "Unknown vendor OUIs copied.")
 
-    # --- [] _on_about --------------------------------------
+    # --- [UI] _on_about --------------------------------------
     def _on_about(self):
         import tkinter.messagebox as mbox
         import platform
@@ -3090,7 +3091,7 @@ class App(tk.Tk):
           #  "SNMP Monitor\nVendor resolution via offline DB + local overrides.\n© You."
         )
 
-    # --- [] _toggle_rdns --------------------------------------
+    # --- [UI] _toggle_rdns --------------------------------------
     def _toggle_rdns(self):
         # Flip the flag in memory
         new_val = not bool(self.cfg.get("resolve_rdns", True))
@@ -3106,7 +3107,7 @@ class App(tk.Tk):
         # Tell the user
         self._set_status(f"rDNS {'ON' if RESOLVE_RDNS else 'OFF'}")
 
-    # --- [] _on_toggle_show_idle --------------------------------------
+    # --- [UI] _on_toggle_show_idle --------------------------------------
     def _on_toggle_show_idle(self) -> None:
         """Persist the 'Show idle devices' toggle to config.json."""
         self.cfg["show_idle_devices"] = bool(self.show_idle_var.get())
