@@ -84,11 +84,11 @@ ENABLE_NETFLOW_V5_COLLECTOR = False  # set False to disable when enabled i get n
 POLL_INTERVAL_SECONDS = 5
 RESOLVE_RDNS = True
 DEFAULT_SHOW_IDLE_DEVICES = False   # Show MACs with no destinations/bytes in Aggregates table?
-DEBUG = False
 ROUTER_IP = "192.168.1.1"
 LOG_FILENAME = "traffic_log.csv"
 COPY_LIMIT_ROWS = 200
 DEBUG_LOG_TAIL_LINES = 200
+DEBUG = False
 # ---- Windows toast (optional) ----
 ENABLE_TOASTS = False  # ← turn off the flaky win10toast path
 
@@ -112,7 +112,7 @@ _DEFAULT_CFG = {
 
 # --- Enable SSH conntrack collector ---
 SSH_SECRETS_FILE = "ssh_secrets.json"
-UDM_SSH_HOST = "192.168.1.1"
+UDM_SSH_HOST = ROUTER_IP
 UDM_SSH_PORT = 22           # usually 22
 # If your UDM lacks the "conntrack" binary, we’ll fall back to reading /proc
 CONNTRACK_POLL_SECS = 3
@@ -159,8 +159,7 @@ SILENCED_MACS = {
 _WHITELIST_DESTS = set(WHITELIST_DESTS)  # as-is (exact ip:port strings)
 _SILENCED_MACS = {m.upper() for m in SILENCED_MACS}
 
-BASE_DIR = APP_ROOT = Path(__file__).resolve().parent
-
+BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
 HOST_ALIAS_PATH = (BASE_DIR / "data" / "host_aliases.json") if "BASE_DIR" in globals() else Path("data/host_aliases.json")
@@ -246,9 +245,10 @@ except Exception:
     _manuf_mod = None
 
 try:
-    from mac_vendor_lookup import MacLookup, AsyncMacLookup  # pip install mac-vendor-lookup aiofiles
+    #from mac_vendor_lookup import MacLookup, AsyncMacLookup  # pip install mac-vendor-lookup aiofiles
+    from mac_vendor_lookup import AsyncMacLookup  # pip install mac-vendor-lookup aiofiles
 except Exception:
-    MacLookup = None
+    #MacLookup = None
     AsyncMacLookup = None
 
 # Normalize MAC to "AA:BB:CC:DD:EE:FF"
@@ -2299,7 +2299,9 @@ class App(tk.Tk):
         }
         self.alerts = ttk.Treeview(alertf, columns=tuple(alerts_labels), show="headings", height=8)
         _force_headings(self.alerts, alerts_labels)
-    
+
+
+
         self.alerts.column("time",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
         self.alerts.column("mac",    width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.alerts.column("vendor", width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
@@ -2341,7 +2343,14 @@ class App(tk.Tk):
         }
         self.tree = ttk.Treeview(midf, columns=tuple(active_labels), show="headings", height=14)
         _force_headings(self.tree, active_labels)
-    
+
+        self._setup_sorting(
+            self.tree,
+            table_name="active",
+            default_col="last",      # default sort by 'Last seen'
+            default_reverse=False,    # newest last
+        )
+
         # Lock first four to match Alerts
         self.tree.column("first",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
         self.tree.column("mac",     width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
@@ -2352,12 +2361,12 @@ class App(tk.Tk):
         self.tree.column("bytes",   width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
         self.tree.column("over1mb", width=70,          minwidth=70,          stretch=False, anchor="center")
         self.tree.column("state",   width=110,         minwidth=80,          stretch=False, anchor="w")
-    
+         
         scry2 = ttk.Scrollbar(midf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scry2.set)
         self.tree.pack(side="left", fill="both", expand=True, pady=8)
         scry2.pack(side="left", fill="y", padx=(0,8), pady=8)
-    
+        
         if hasattr(self, "_bind_edit_on_doubleclick"):
             self._bind_edit_on_doubleclick(self.tree, mac_col="mac", vendor_col="vendor", local_col="local")
         if hasattr(self, "_apply_state_visibility"):
@@ -2381,9 +2390,17 @@ class App(tk.Tk):
             "dest":      "Destination",
             "bytes":     "Total Bytes",
         }
+    
         self.agg = ttk.Treeview(aggf, columns=tuple(agg_labels), show="headings", height=8)
         _force_headings(self.agg, agg_labels)
     
+        self._setup_sorting(
+            self.agg,
+            table_name="agg",
+            default_col="sightings",      # sort by bytes descending by default
+            default_reverse=True,
+        )
+        
         self.agg.column("sightings", width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="e")
         self.agg.column("mac",       width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.agg.column("vendor",    width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
@@ -3184,7 +3201,15 @@ class App(tk.Tk):
                         agg_dest,                           # Destination
                         int(stats.get("bytes") or 0),       # Total Bytes
                     ))
-    
+              
+                    # Re-apply any remembered sort on all tables
+        try:
+            self._reapply_sort_if_any("alerts", self.alerts)
+            self._reapply_sort_if_any("active", self.tree)
+            self._reapply_sort_if_any("agg", self.agg)
+        except Exception:
+            pass
+        
             # ---------------- status line (top-right) + ssh status echo -------------
             nf_status = "OFF"
             if self.nf:
@@ -3749,6 +3774,7 @@ class App(tk.Tk):
 
 # -------------------- Offline MAC → Vendor resolver (enhanced) --------------------
 
+
 def _candidate_vendor_files() -> list[Path]:
     here = BASE_DIR
     return [
@@ -3796,6 +3822,7 @@ def _is_locally_admin(mac: str) -> bool:
         return bool(first_octet & 0x02)
     except ValueError:
         return False
+
 
 class _VendorResolver:
     def __init__(self, files: Iterable[Path] = ()):
