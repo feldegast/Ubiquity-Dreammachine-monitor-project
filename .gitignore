@@ -159,3 +159,4 @@ alerts_log.csv
 alerts_log.csv
 data/host_aliases.json
 traffic_log.csv
+data/mac_labels.json

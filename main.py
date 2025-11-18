@@ -75,8 +75,8 @@ except Exception:
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "5.8"
-VERSION_DATE = "2025.11.14"
+VERSION = "5.9"
+VERSION_DATE = "2025.11.18"
 
 #uaser data defaults
 ENABLE_CONNTRACK_SSH = True   # ← make sure this is here and not commented out
@@ -107,6 +107,8 @@ _DEFAULT_CFG = {
     "enable_toasts": ENABLE_TOASTS,   # keep False unless you really want the Win hook
     # add any other user-tunable settings here
 }
+
+
 
 # --- Enable SSH conntrack collector ---
 SSH_SECRETS_FILE = "ssh_secrets.json"
@@ -157,11 +159,54 @@ SILENCED_MACS = {
 _WHITELIST_DESTS = set(WHITELIST_DESTS)  # as-is (exact ip:port strings)
 _SILENCED_MACS = {m.upper() for m in SILENCED_MACS}
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = APP_ROOT = Path(__file__).resolve().parent
+
+DATA_DIR = BASE_DIR / "data"
 
 HOST_ALIAS_PATH = (BASE_DIR / "data" / "host_aliases.json") if "BASE_DIR" in globals() else Path("data/host_aliases.json")
 HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
-VENDOR_PATH     = BASE_DIR / "data" / "mac-vendor-overrides.txt"
+
+# Per-device custom labels (MAC → friendly name)
+MAC_LABELS_PATH = DATA_DIR / "mac_labels.json" # was mac-vendor-overrides.txt before changed to JSON
+MAC_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def load_mac_labels() -> dict[str, str]:
+    """Load MAC → label mappings from data/mac_labels.json."""
+    labels: dict[str, str] = {}
+    path = MAC_LABELS_PATH
+
+    if not path.is_file():
+        return labels
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if not k:
+                    continue
+                mac = str(k).strip().upper()
+                # Store empty-string labels as "no label"
+                labels[mac] = "" if v is None else str(v)
+    except Exception:
+        # Stay resilient if file is malformed
+        pass
+
+    return labels
+
+
+def save_mac_labels(labels: dict[str, str]) -> None:
+    """Persist MAC → label mappings back to data/mac_labels.json."""
+    path = MAC_LABELS_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Optionally drop empty labels from disk to keep the file tidy
+        clean = {k: v for k, v in labels.items() if v}
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(clean, f, indent=2, sort_keys=True)
+    except Exception:
+        # Fail silently – UI should keep working even if write fails
+        pass
 
 #VENDOR_DB = VendorDB(base_dir=BASE_DIR)
 #DEVICE_NAMER = DeviceNamer(base_dir=BASE_DIR)
@@ -208,6 +253,8 @@ except Exception:
 
 # Normalize MAC to "AA:BB:CC:DD:EE:FF"
 _MAC_RE = re.compile(r"[0-9A-Fa-f]{2}")
+
+# --- [] _normalize_mac
 def _normalize_mac(mac: str) -> str:
     if not mac:
         return ""
@@ -215,9 +262,24 @@ def _normalize_mac(mac: str) -> str:
     parts = [p.upper() for p in parts[:6]]
     return ":".join(parts) if len(parts) == 6 else ""
 
+# --- [] _norm_mac
+def _norm_mac(mac: str) -> str:
+    if not mac:
+        return ""
+    mac = mac.strip().upper().replace("-", ":")
+    parts = [p for p in mac.split(":") if p]
+    # force 6 bytes if possible
+    if len(parts) >= 6:
+        parts = parts[:6]
+    return ":".join(parts)
+
+# --- [] _mac_oui
 def _mac_oui(mac: str) -> str:
-    mac = _normalize_mac(mac)
-    return mac[:8] if len(mac) == 17 else ""  # "AA:BB:CC"
+    mac_norm = _norm_mac(mac)
+    parts = mac_norm.split(":")
+    if len(parts) < 3:
+        return ""
+    return ":".join(parts[:3])  # "AA:BB:CC"
 
 # --- [HOSTNAME|CORE] _HostnameResolver ---------------------------------
 class _HostnameResolver:
@@ -226,6 +288,7 @@ class _HostnameResolver:
     Precedence: alias > rDNS > ''.
     Thread-safe via a single RLock.
     """
+    # __init__
     def __init__(self, alias_path: Path):
         import threading, json
         self._alias_path = Path(alias_path)
@@ -236,6 +299,7 @@ class _HostnameResolver:
         self._load_aliases()  # load once on init
 
     # ---------- persistence ----------
+    # _load_aliases
     def _load_aliases(self) -> None:
         try:
             if self._alias_path.exists():
@@ -249,6 +313,7 @@ class _HostnameResolver:
             # don't crash UI if file is malformed
             pass
 
+    # _save_aliases
     def _save_aliases(self) -> None:
         # call only while holding self._lock
         try:
@@ -259,10 +324,12 @@ class _HostnameResolver:
             pass
 
     # ---------- public API ----------
+    # aliases
     def aliases(self) -> dict[str, str]:
         with self._lock:
             return dict(self._aliases)
-
+        
+    # set_alias
     def set_alias(self, ip: str, name: str | None) -> None:
         ip = (ip or "").strip()
         with self._lock:
@@ -272,11 +339,13 @@ class _HostnameResolver:
                 self._aliases.pop(ip, None)
         self._save_aliases()
 
+    # clear_cache
     def clear_cache(self) -> None:
         """Clear rDNS cache, keep aliases."""
         with self._lock:
             self._rdns_cache.clear()
 
+    # _ip_from_hostport
     @staticmethod
     def _ip_from_hostport(local_hostport: str) -> str:
         # "A.B.C.D:port" -> "A.B.C.D"
@@ -286,6 +355,7 @@ class _HostnameResolver:
         parts = s.rsplit(":", 1)
         return parts[0] if parts else s
 
+    # name_for_ip
     def name_for_ip(self, ip: str) -> str:
         """Return alias if set, else cached rDNS, else ''. Non-blocking."""
         with self._lock:
@@ -293,6 +363,7 @@ class _HostnameResolver:
                 return self._aliases[ip]
             return self._rdns_cache.get(ip, "")
 
+    # put_rdns
     def put_rdns(self, ip: str, hostname: str) -> None:
         with self._lock:
             # don't override alias
@@ -656,6 +727,38 @@ def normalize_mac(mac) -> str:
     if s in ZERO_MACS:
         return ""
     return s
+
+def prepare_row_for_ui(row: dict) -> dict:
+    """
+    Ensure each UI row has normalized MAC + resolved vendor.
+
+    - Normalizes MAC into 'AA:BB:CC:DD:EE:FF'
+    - Fills in row['vendor'] if missing/empty using lookup_vendor()
+    """
+    if row is None:
+        return {}
+
+    # Work on a shallow copy so we don’t mutate core structures unexpectedly
+    out = dict(row)
+
+    # Try a few possible keys for MAC (depending on which table)
+    mac = (
+        out.get("mac")
+        or out.get("local_mac")
+        or out.get("client_mac")
+        or ""
+    )
+    mac = normalize_mac(mac)
+    out["mac"] = mac  # keep a consistent key for MAC for the UI
+
+    # Only compute vendor if not already set
+    vendor = out.get("vendor")
+    if not vendor:
+        vendor = lookup_vendor(mac)
+        out["vendor"] = vendor
+
+    return out
+
 
 # --- [] _merge_ip2mac_from_snmp ------------------------------------
 def _merge_ip2mac_from_snmp():
@@ -2310,198 +2413,19 @@ class App(tk.Tk):
 # =============================================================================
 # region UI CONTROLLER
 
-# --- helpers shared by refresh/build --------------------------------
 # --- [HELPERS|ALIAS/VENDOR LABELS] -----------------------------------------
 
-    def _fmt_dest(remote_ip: str, remote_port: int | str) -> str:
-        # Use rDNS cache if present
-        try:
-            with _dns_lock:
-                host = _dns_cache.get(remote_ip)
-        except Exception:
-            host = None
-        return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
 
-    def _parse_ip_from_hostport(hp: str) -> str:
-        # "a.b.c.d:pppp" -> "a.b.c.d"
-        try:
-            return hp.rsplit(":", 1)[0]
-        except Exception:
-            return ""
-
-    def _get_current_label_for_mac(self, mac: str) -> str:
-        if not mac:
-            return ""
-        d = getattr(self, "_mac_labels", None)
-        return (d or {}).get(mac.upper(), "")
-
-    def _set_label_for_mac(self, mac: str, label: str) -> None:
-        if not hasattr(self, "_mac_labels"):
-            self._mac_labels = {}
-        if mac:
-            self._mac_labels[mac.upper()] = label or ""
-
-    def _edit_alias_for_ip(self, ip: str) -> None:
-        """Quick inline editor for a single IP alias, used when double-clicking a local IP."""
-        from tkinter import simpledialog as sd, messagebox as mb
-
-        ip = (ip or "").strip()
-        if not ip:
-            return
-
-        # Get current alias, if any
-        try:
-            current = _HOSTNAMES.name_for_ip(ip) or ""
-        except Exception:
-            current = ""
-
-        name = sd.askstring(
-            "Hostname Alias",
-            f"IP: {ip}\nFriendly name:",
-            initialvalue=current,
-            parent=self,
-        )
-        if name is None:
-            return  # user cancelled
-
-        name = name.strip()
-
-        try:
-            # Empty -> clear alias
-            _HOSTNAMES.set_alias(ip, name or None)
-        except Exception:
-            mb.showerror("Error", f"Failed to update alias for {ip}", parent=self)
-            return
-
-        # Refresh any views that show Vendor/Host using _display_name(...)
-        try:
-            self._refresh_vendor_column_for_table(self.tree)
-        except Exception:
-            pass
-        try:
-            self._refresh_vendor_column_for_table(self.agg)
-        except Exception:
-            pass
-
-
-    def _open_edit_dialog(self, mac_initial: str, ip_initial: str) -> tuple[str, str] | None:
-        """Modal dialog to edit a custom device label for a MAC address.
-
-        ip_initial is only used as context (shown read-only if present).
-        """
-        import tkinter as tk
-        from tkinter import ttk
-
-        # Parent window
-        win = tk.Toplevel(self)
-        win.title("Edit Device Label")
-        win.transient(self)
-        win.grab_set()
-        win.resizable(False, False)
-
-        # Current custom label for this MAC (if any)
-        cur_label = self._get_current_label_for_mac(mac_initial) if mac_initial else ""
-
-        # --- Row 0: MAC address (read-only) ------------------------------------
-        ttk.Label(win, text="MAC address:").grid(
-            row=0, column=0, sticky="w", padx=8, pady=(8, 2)
-        )
-        mac_var = tk.StringVar(value=mac_initial or "")
-        mac_entry = ttk.Entry(win, textvariable=mac_var, width=28, state="readonly")
-        mac_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 2))
-
-        # --- Row 1: Custom device label ----------------------------------------
-        ttk.Label(win, text="Custom device label:").grid(
-            row=1, column=0, sticky="w", padx=8, pady=2
-        )
-        label_var = tk.StringVar(value=cur_label)
-        ttk.Entry(win, textvariable=label_var, width=28).grid(
-            row=1, column=1, sticky="ew", padx=8, pady=2
-        )
-
-        # Optional context: show which IP this row came from
-        next_row = 2
-        if ip_initial:
-            ttk.Label(
-                win,
-                text=f"Seen at IP: {ip_initial}",
-            ).grid(row=next_row, column=0, columnspan=2,
-                   sticky="w", padx=8, pady=(4, 2))
-            next_row += 1
-
-        # Buttons
-        btnf = ttk.Frame(win)
-        btnf.grid(row=next_row, column=0, columnspan=2,
-                  sticky="e", padx=8, pady=8)
-
-        result: list[tuple[str, str] | None] = [None]
-
-        def _ok():
-            mac = (mac_var.get() or "").strip()
-            lbl = (label_var.get() or "").strip()
-
-            if mac:
-                self._set_label_for_mac(mac, lbl)
-
-            # We keep the return type compatible: (mac, ip_initial)
-            result[0] = (mac, ip_initial or "")
-            win.destroy()
-
-        def _cancel():
-            result[0] = None
-            win.destroy()
-
-        ttk.Button(btnf, text="Cancel", command=_cancel).pack(side="right", padx=(8, 0))
-        ttk.Button(btnf, text="OK", command=_ok).pack(side="right")
-
-        # Center over parent
-        win.update_idletasks()
-        try:
-            parent_x = self.winfo_rootx()
-            parent_y = self.winfo_rooty()
-            parent_w = self.winfo_width()
-            parent_h = self.winfo_height()
-            w = win.winfo_width()
-            h = win.winfo_height()
-            x = parent_x + (parent_w - w) // 2
-            y = parent_y + (parent_h - h) // 2
-            win.geometry(f"+{x}+{y}")
-        except Exception:
-            pass
-
-        win.wait_window()
-        return result[0]
-
-    def _set_status(self, msg: str):
-        """Safely update a status indicator if present; otherwise fall back."""
-        try:
-            # Common pattern: a StringVar bound to a status bar label
-            sv = getattr(self, "status_var", None)
-            if sv is not None:
-                sv.set(str(msg))
-                try:
-                    self.update_idletasks()
-                except Exception:
-                    pass
-                return
-
-            # Or a direct statusbar label widget
-            sb = getattr(self, "statusbar", None)
-            if sb is not None and hasattr(sb, "config"):
-                sb.config(text=str(msg))
-                try:
-                    self.update_idletasks()
-                except Exception:
-                    pass
-                return
-        except Exception:
-            pass
-
-        # Last resort: reflect in the window title, or print
-        try:
-            self.title(f"SNMP Monitor — {msg}")
-        except Exception:
-            print(str(msg))
+    def _apply_state_visibility(self):
+        """Hide/show the 'state' column (last col in Active). Hidden unless DEBUG."""
+        show = bool(globals().get("DEBUG", False))
+        col = "state"
+        if show:
+            self.tree.heading(col, text="State")
+            self.tree.column(col, width=110, minwidth=60, stretch=False, anchor="w")
+        else:
+            self.tree.heading(col, text="")
+            self.tree.column(col, width=0, minwidth=0, stretch=False)
 
     def _bind_edit_on_doubleclick(self, tv, mac_col="mac", vendor_col="vendor", local_col=None):
         """
@@ -2612,16 +2536,232 @@ class App(tk.Tk):
                 return f"{ip_port} [{host}]"
         return ip_port
 
-    def _apply_state_visibility(self):
-        """Hide/show the 'state' column (last col in Active). Hidden unless DEBUG."""
-        show = bool(globals().get("DEBUG", False))
-        col = "state"
-        if show:
-            self.tree.heading(col, text="State")
-            self.tree.column(col, width=110, minwidth=60, stretch=False, anchor="w")
+    def _edit_alias_for_ip(self, ip: str) -> None:
+        """Quick inline editor for a single IP alias, used when double-clicking a local IP."""
+        from tkinter import simpledialog as sd, messagebox as mb
+
+        ip = (ip or "").strip()
+        if not ip:
+            return
+
+        # Get current alias, if any
+        try:
+            current = _HOSTNAMES.name_for_ip(ip) or ""
+        except Exception:
+            current = ""
+
+        name = sd.askstring(
+            "Hostname Alias",
+            f"IP: {ip}\nFriendly name:",
+            initialvalue=current,
+            parent=self,
+        )
+        if name is None:
+            return  # user cancelled
+
+        name = name.strip()
+
+        try:
+            # Empty -> clear alias
+            _HOSTNAMES.set_alias(ip, name or None)
+        except Exception:
+            mb.showerror("Error", f"Failed to update alias for {ip}", parent=self)
+            return
+
+        # Refresh any views that show Vendor/Host using _display_name(...)
+        try:
+            self._refresh_vendor_column_for_table(self.tree)
+        except Exception:
+            pass
+        try:
+            self._refresh_vendor_column_for_table(self.agg)
+        except Exception:
+            pass
+
+    def _ensure_mac_labels_loaded(self) -> None:
+        """Lazy-load MAC labels from disk into self._mac_labels once."""
+        if getattr(self, "_mac_labels_loaded", False):
+            return
+        try:
+            self._mac_labels = load_mac_labels()
+        except Exception:
+            self._mac_labels = {}
+        self._mac_labels_loaded = True
+
+    def _fmt_dest(remote_ip: str, remote_port: int | str) -> str:
+        # Use rDNS cache if present
+        try:
+            with _dns_lock:
+                host = _dns_cache.get(remote_ip)
+        except Exception:
+            host = None
+        return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
+
+    def _get_current_label_for_mac(self, mac: str) -> str:
+        if not mac:
+            return ""
+        try:
+            self._ensure_mac_labels_loaded()
+        except Exception:
+            pass
+        d = getattr(self, "_mac_labels", None) or {}
+        return d.get(mac.upper(), "")
+
+    def _open_edit_dialog(self, mac_initial: str, ip_initial: str) -> tuple[str, str] | None:
+        """Modal dialog to edit a custom device label for a MAC address.
+
+        ip_initial is only used as context (shown read-only if present).
+        """
+        import tkinter as tk
+        from tkinter import ttk
+
+        # Parent window
+        win = tk.Toplevel(self)
+        win.title("Edit Device Label")
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, False)
+
+        # Current custom label for this MAC (if any)
+        cur_label = self._get_current_label_for_mac(mac_initial) if mac_initial else ""
+
+        # --- Row 0: MAC address (read-only) ------------------------------------
+        ttk.Label(win, text="MAC address:").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(8, 2)
+        )
+        mac_var = tk.StringVar(value=mac_initial or "")
+        mac_entry = ttk.Entry(win, textvariable=mac_var, width=28, state="readonly")
+        mac_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 2))
+
+        # --- Row 1: Custom device label ----------------------------------------
+        ttk.Label(win, text="Custom device label:").grid(
+            row=1, column=0, sticky="w", padx=8, pady=2
+        )
+        label_var = tk.StringVar(value=cur_label)
+        ttk.Entry(win, textvariable=label_var, width=28).grid(
+            row=1, column=1, sticky="ew", padx=8, pady=2
+        )
+
+        # Optional context: show which IP this row came from
+        next_row = 2
+        if ip_initial:
+            ttk.Label(
+                win,
+                text=f"Seen at IP: {ip_initial}",
+            ).grid(row=next_row, column=0, columnspan=2,
+                   sticky="w", padx=8, pady=(4, 2))
+            next_row += 1
+
+        # Buttons
+        btnf = ttk.Frame(win)
+        btnf.grid(row=next_row, column=0, columnspan=2,
+                  sticky="e", padx=8, pady=8)
+
+        result: list[tuple[str, str] | None] = [None]
+
+        def _ok():
+            mac = (mac_var.get() or "").strip()
+            lbl = (label_var.get() or "").strip()
+
+            if mac:
+                self._set_label_for_mac(mac, lbl)
+
+            # We keep the return type compatible: (mac, ip_initial)
+            result[0] = (mac, ip_initial or "")
+            win.destroy()
+
+        def _cancel():
+            result[0] = None
+            win.destroy()
+
+        ttk.Button(btnf, text="Cancel", command=_cancel).pack(side="right", padx=(8, 0))
+        ttk.Button(btnf, text="OK", command=_ok).pack(side="right")
+
+        # Center over parent
+        win.update_idletasks()
+        try:
+            parent_x = self.winfo_rootx()
+            parent_y = self.winfo_rooty()
+            parent_w = self.winfo_width()
+            parent_h = self.winfo_height()
+            w = win.winfo_width()
+            h = win.winfo_height()
+            x = parent_x + (parent_w - w) // 2
+            y = parent_y + (parent_h - h) // 2
+            win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        win.wait_window()
+        return result[0]
+
+    def _parse_ip_from_hostport(hp: str) -> str:
+        # "a.b.c.d:pppp" -> "a.b.c.d"
+        try:
+            return hp.rsplit(":", 1)[0]
+        except Exception:
+            return ""
+
+    def _set_label_for_mac(self, mac: str, label: str) -> None:
+        """Set or clear a custom label for a MAC and persist to disk."""
+        mac = (mac or "").strip().upper()
+        if not mac:
+            return
+
+        # Make sure in-memory dict is loaded from disk first
+        try:
+            self._ensure_mac_labels_loaded()
+        except Exception:
+            if not hasattr(self, "_mac_labels"):
+                self._mac_labels = {}
+
+        if not hasattr(self, "_mac_labels"):
+            self._mac_labels = {}
+
+        # Empty/whitespace label = remove mapping
+        lbl = (label or "").strip()
+        if lbl:
+            self._mac_labels[mac] = lbl
         else:
-            self.tree.heading(col, text="")
-            self.tree.column(col, width=0, minwidth=0, stretch=False)
+            self._mac_labels.pop(mac, None)
+
+        # Persist updated map
+        try:
+            save_mac_labels(self._mac_labels)
+        except Exception:
+            # Don't crash the UI if write fails
+            pass
+
+    def _set_status(self, msg: str):
+        """Safely update a status indicator if present; otherwise fall back."""
+        try:
+            # Common pattern: a StringVar bound to a status bar label
+            sv = getattr(self, "status_var", None)
+            if sv is not None:
+                sv.set(str(msg))
+                try:
+                    self.update_idletasks()
+                except Exception:
+                    pass
+                return
+
+            # Or a direct statusbar label widget
+            sb = getattr(self, "statusbar", None)
+            if sb is not None and hasattr(sb, "config"):
+                sb.config(text=str(msg))
+                try:
+                    self.update_idletasks()
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        # Last resort: reflect in the window title, or print
+        try:
+            self.title(f"SNMP Monitor — {msg}")
+        except Exception:
+            print(str(msg))
 
     def _setup_sorting(self, tree: "ttk.Treeview", table_name: str, default_col: str | None = None, default_reverse: bool = False):
         """
@@ -3007,7 +3147,7 @@ class App(tk.Tk):
             all_macs = macs_from_arp | macs_from_aggs
     
             for mac in sorted(all_macs):
-                vendor = lookup_vendor(mac) if mac else "Unknown"
+                vendor = self._display_name(local_ip=None, mac=mac)
                 dests = self.core.aggregates.get(mac, {})
     
                 if not dests:
@@ -3121,6 +3261,244 @@ class App(tk.Tk):
     # Purpose: Prompt for a friendly name for the selected Active row's local IP
     # --- [UI|ALIASES] _on_set_hostname_alias ------------------------------
     # Purpose: Prompt for a friendly name for the selected Active row's local IP
+    
+    # --- [UI|COPY] _copy_alerts ------------------------------------
+    def _copy_alerts(self):
+        rows = []
+        header = ["Time","Local","MAC","Vendor","Remote","Hostname","Bytes","Note"]
+        rows.append("\t".join(header))
+        items = list(self.alerts.get_children())[:COPY_LIMIT_ROWS]
+        for iid in items:
+            vals = self.alerts.item(iid)["values"]
+            rows.append("\t".join(str(v) for v in vals))
+        blob = "=== Alerts (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows)
+        self._copy_to_clipboard(blob, f"Copied {len(items)} alert rows to clipboard")
+
+    # --- [UI|EXPORT] _export_snapshot ------------------------------------
+    def _export_snapshot(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"snapshot_{ts}.csv"
+        try:
+            with open(fname, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["local","mac","vendor","remote","state","first","last","bytes_tx","over_1mb"])
+                for iid in self.tree.get_children():
+                    w.writerow(self.tree.item(iid)["values"])
+            self.status.set(f"Snapshot exported → {fname}")
+        except Exception as e:
+            self.status.set(f"Export failed: {e}")
+ 
+    # --- [UI|CLIP] _copy_to_clipboard ------------------------------------
+    def _copy_to_clipboard(self, text: str, ok_msg: str):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()  # ensures clipboard gets the data
+            self.status.set(ok_msg)
+        except Exception as e:
+            self.status.set(f"Copy failed: {e}")
+
+    # --- [UI|COPY] Copy visible Active table -------------------------------------
+    def _copy_active(self):
+        # Pull visible items from the Treeview if present; else from core
+        header = ["Local", "MAC", "Vendor", "Remote", "State", "First Seen", "Last Seen", "Bytes (TX)", ">1MB?"]
+        rows = ["\t".join(header)]
+
+        def _fmt_local(rec):
+            lip = rec.get("local_ip") or rec.get("src_ip") or ""
+            lpt = rec.get("local_port") or rec.get("src_port")
+            return f"{lip}:{lpt}" if lip and lpt is not None else str(lip)
+
+        def _fmt_remote(rec):
+            rip = rec.get("remote_ip") or rec.get("dst_ip") or ""
+            rpt = rec.get("remote_port") or rec.get("dst_port")
+            host = rec.get("remote_host") or rec.get("rdns") or rec.get("hostname")
+            host_part = f" [{host}]" if host else ""
+            base = f"{rip}{host_part}"
+            return f"{base}:{rpt}" if rip and rpt is not None else base
+
+        def _fmt_bytes(n):
+            try:
+                return str(int(n))
+            except Exception:
+                return str(n or 0)
+
+        items = []
+        try:
+            # Preferred: copy what the user sees (Tree rows)
+            items = list(self.tree.get_children())[:COPY_LIMIT_ROWS]
+            for iid in items:
+                vals = self.tree.item(iid)["values"]
+                rows.append("\t".join(str(v) for v in vals))
+        except Exception:
+            # Fallback: pull from core directly
+            recs = self.core.get_active_rows_prepared(limit=COPY_LIMIT_ROWS)
+            for rec in recs:
+                local = _fmt_local(rec)
+                mac = rec.get("local_mac") or ""
+                vendor = rec.get("vendor") or "Unknown"
+                remote = _fmt_remote(rec)
+                state = rec.get("state") or rec.get("tcp_state") or ""
+                first_seen = rec.get("first_seen") or ""
+                last_seen = rec.get("last_seen") or ""
+                raw_bytes = rec.get("bytes") or rec.get("bytes_tx") or 0
+                btx = _fmt_bytes(raw_bytes)
+                over = "Yes" if isinstance(raw_bytes, (int, float)) and raw_bytes >= 1_048_576 else "No"
+                rows.append("\t".join([local, mac, vendor, remote, state, str(first_seen), str(last_seen), btx, over]))
+
+        blob = "=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows)
+        self._copy_to_clipboard(blob, f"Copied {len(items) if items else min(len(rows)-1, COPY_LIMIT_ROWS)} active rows to clipboard")
+
+    # --- [UI|COPY] _copy_aggregates ------------------------------------
+    def _copy_aggregates(self):
+        # Copy the visible Aggregates table (first COPY_LIMIT_ROWS rows)
+        rows = []
+        header = ["MAC", "Vendor", "Dest (IP:Port)", "Sightings", "Bytes"]
+        rows.append("\t".join(header))
+        items = list(self.agg.get_children())[:COPY_LIMIT_ROWS]
+        for iid in items:
+            vals = self.agg.item(iid)["values"]
+            rows.append("\t".join(str(v) for v in vals))
+        blob = "=== Aggregates (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows)
+        self._copy_to_clipboard(blob, f"Copied {len(items)} aggregate rows to clipboard")
+
+    # --- [UI|COPY|DEBUG] _copy_debug_bundle ------------------------------------
+    def _copy_debug_bundle(self):
+        # Build a single text payload with:
+        # - Active (top N)
+        # - Aggregates (top N)
+        # - env info (versions & config)
+        # - Top NetFlow flows (if collector is running)
+        # - Tail of traffic_log.csv
+
+        parts = []
+
+        # 1) Env block
+        try:
+            import platform, sys as _sys
+            try:
+                from importlib import metadata as _md
+            except Exception:
+                _md = None
+            puresnmp_ver = "unknown"
+            if _md:
+                try:
+                    puresnmp_ver = _md.version("puresnmp")
+                except Exception:
+                    pass
+            env = [
+                "=== Environment ===",
+                f"Python: {platform.python_version()} ({platform.system()} {platform.release()})",
+                f"puresnmp: {puresnmp_ver}",
+                f"SNMP backend: {get_snmp_backend_name()}",
+                f"Router IP: {ROUTER_IP}",
+                f"Community: {SNMP_COMMUNITY}",
+                f"Poll Interval (s): {POLL_INTERVAL_SECONDS}",
+                f"NetFlow v5 collector: {'ON' if getattr(self, 'nf', None) else 'OFF'} on {NETFLOW_LISTEN_IP}:{NETFLOW_LISTEN_PORT}",
+                "",
+            ]
+            parts.append("\n".join(env))
+        except Exception:
+            pass
+
+        # 2) Active table via core (normalized)
+        header = ["Local", "MAC", "Vendor", "Remote", "State", "First Seen", "Last Seen", "Bytes (TX)", ">1MB?"]
+        rows = ["\t".join(header)]
+
+        def _fmt_local(rec):
+            lip = rec.get("local_ip") or rec.get("src_ip") or ""
+            lpt = rec.get("local_port") or rec.get("src_port")
+            return f"{lip}:{lpt}" if lip and lpt is not None else str(lip)
+
+        def _fmt_remote(rec):
+            rip = rec.get("remote_ip") or rec.get("dst_ip") or ""
+            rpt = rec.get("remote_port") or rec.get("dst_port")
+            host = rec.get("remote_host") or rec.get("rdns") or rec.get("hostname")
+            host_part = f" [{host}]" if host else ""
+            base = f"{rip}{host_part}"
+            return f"{base}:{rpt}" if rip and rpt is not None else base
+
+        def _fmt_bytes(n):
+            try:
+                return str(int(n))
+            except Exception:
+                return str(n or 0)
+
+        recs = self.core.get_active_rows_prepared(limit=COPY_LIMIT_ROWS)
+        for rec in recs:
+            local = _fmt_local(rec)
+            mac = rec.get("local_mac") or ""
+            vendor = rec.get("vendor") or "Unknown"
+            remote = _fmt_remote(rec)
+            state = rec.get("state") or rec.get("tcp_state") or ""
+            first_seen = rec.get("first_seen") or ""
+            last_seen = rec.get("last_seen") or ""
+            raw_bytes = rec.get("bytes") or rec.get("bytes_tx") or 0
+            btx = _fmt_bytes(raw_bytes)
+            over = "Yes" if isinstance(raw_bytes, (int, float)) and raw_bytes >= 1_048_576 else "No"
+            rows.append("\t".join([local, mac, vendor, remote, state, str(first_seen), str(last_seen), btx, over]))
+
+        parts.append("=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows) + "\n")
+
+        # (Optional) add more parts here (aggregates, tail of logs, etc.)
+
+        self._copy_to_clipboard("\n".join(parts), "Debug bundle copied")
+
+    # --- [UI|DEVICE NAME] _display_name ------------------------------------
+    def _display_name(self, local_ip: str | None, mac: str | None) -> str:
+        """Human-friendly name for a device, used in Vendor/Host columns.
+    
+        Priority:
+          1) Hostname alias for the IP (host_aliases.json)
+          2) Custom device label for the MAC
+          3) Vendor name for the MAC
+          4) "Unknown"
+        """
+        # 1) IP alias (from host_aliases.json via _HOSTNAMES)
+        try:
+            # prefer alias/rDNS for the LAN device (local_ip)
+            if local_ip:
+                host = _HOSTNAMES.name_for_ip(local_ip)
+                if host:
+                    return host
+        except Exception:
+            pass
+    
+        # 2) Custom MAC label
+        try:
+            if mac and hasattr(self, "_get_current_label_for_mac"):
+                lbl = self._get_current_label_for_mac(mac)
+                if lbl:
+                    return lbl
+        except Exception:
+            pass
+    
+        # 3) Fallback: vendor
+        try:
+            return vendor_for_mac(mac) if mac else "Unknown"
+        except Exception:
+            return "Unknown"
+
+    # --- [UI|DEBUG] _dump_neighbors_csv ------------------------------------
+    def _dump_neighbors_csv(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"neighbors_{ts}.csv"
+        try:
+            rows = []
+            # SNMP view
+            rows.append(["SOURCE","IP","MAC"])
+            for ip, mac in sorted(self.core.ip2mac.items()):
+                rows.append(["SNMP", ip, mac])
+            # SSH view (live snapshot)
+            if isinstance(self.nf, ConntrackCollectorSSH):
+                for ip, mac in self.nf.get_ip_neigh_snapshot():
+                    rows.append(["SSH", ip, mac])
+            with open(fname, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerows(rows)
+            self.status.set(f"Neighbors dumped → {fname}")
+        except Exception as e:
+            self.status.set(f"Dump failed: {e}")
+
     def _on_set_hostname_alias(self):
         # Find a selected row in the Active Connections table (LAN device lives in 'local')
         item = self.tree.selection()
@@ -3314,244 +3692,6 @@ class App(tk.Tk):
         _HOSTNAMES.clear_cache()
         self.status.set("Hostname cache cleared.")
 
-    # --- [UI|COPY] _copy_alerts ------------------------------------
-    def _copy_alerts(self):
-        rows = []
-        header = ["Time","Local","MAC","Vendor","Remote","Hostname","Bytes","Note"]
-        rows.append("\t".join(header))
-        items = list(self.alerts.get_children())[:COPY_LIMIT_ROWS]
-        for iid in items:
-            vals = self.alerts.item(iid)["values"]
-            rows.append("\t".join(str(v) for v in vals))
-        blob = "=== Alerts (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows)
-        self._copy_to_clipboard(blob, f"Copied {len(items)} alert rows to clipboard")
-
-    # --- [UI|EXPORT] _export_snapshot ------------------------------------
-    def _export_snapshot(self):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"snapshot_{ts}.csv"
-        try:
-            with open(fname, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["local","mac","vendor","remote","state","first","last","bytes_tx","over_1mb"])
-                for iid in self.tree.get_children():
-                    w.writerow(self.tree.item(iid)["values"])
-            self.status.set(f"Snapshot exported → {fname}")
-        except Exception as e:
-            self.status.set(f"Export failed: {e}")
- 
-    # --- [UI|CLIP] _copy_to_clipboard ------------------------------------
-    def _copy_to_clipboard(self, text: str, ok_msg: str):
-        try:
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            self.update()  # ensures clipboard gets the data
-            self.status.set(ok_msg)
-        except Exception as e:
-            self.status.set(f"Copy failed: {e}")
-
-    # --- [UI|COPY] Copy visible Active table -------------------------------------
-    def _copy_active(self):
-        # Pull visible items from the Treeview if present; else from core
-        header = ["Local", "MAC", "Vendor", "Remote", "State", "First Seen", "Last Seen", "Bytes (TX)", ">1MB?"]
-        rows = ["\t".join(header)]
-
-        def _fmt_local(rec):
-            lip = rec.get("local_ip") or rec.get("src_ip") or ""
-            lpt = rec.get("local_port") or rec.get("src_port")
-            return f"{lip}:{lpt}" if lip and lpt is not None else str(lip)
-
-        def _fmt_remote(rec):
-            rip = rec.get("remote_ip") or rec.get("dst_ip") or ""
-            rpt = rec.get("remote_port") or rec.get("dst_port")
-            host = rec.get("remote_host") or rec.get("rdns") or rec.get("hostname")
-            host_part = f" [{host}]" if host else ""
-            base = f"{rip}{host_part}"
-            return f"{base}:{rpt}" if rip and rpt is not None else base
-
-        def _fmt_bytes(n):
-            try:
-                return str(int(n))
-            except Exception:
-                return str(n or 0)
-
-        items = []
-        try:
-            # Preferred: copy what the user sees (Tree rows)
-            items = list(self.tree.get_children())[:COPY_LIMIT_ROWS]
-            for iid in items:
-                vals = self.tree.item(iid)["values"]
-                rows.append("\t".join(str(v) for v in vals))
-        except Exception:
-            # Fallback: pull from core directly
-            recs = self.core.get_active_rows_prepared(limit=COPY_LIMIT_ROWS)
-            for rec in recs:
-                local = _fmt_local(rec)
-                mac = rec.get("local_mac") or ""
-                vendor = rec.get("vendor") or "Unknown"
-                remote = _fmt_remote(rec)
-                state = rec.get("state") or rec.get("tcp_state") or ""
-                first_seen = rec.get("first_seen") or ""
-                last_seen = rec.get("last_seen") or ""
-                raw_bytes = rec.get("bytes") or rec.get("bytes_tx") or 0
-                btx = _fmt_bytes(raw_bytes)
-                over = "Yes" if isinstance(raw_bytes, (int, float)) and raw_bytes >= 1_048_576 else "No"
-                rows.append("\t".join([local, mac, vendor, remote, state, str(first_seen), str(last_seen), btx, over]))
-
-        blob = "=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows)
-        self._copy_to_clipboard(blob, f"Copied {len(items) if items else min(len(rows)-1, COPY_LIMIT_ROWS)} active rows to clipboard")
-
-    # --- [UI|COPY] _copy_aggregates ------------------------------------
-    def _copy_aggregates(self):
-        # Copy the visible Aggregates table (first COPY_LIMIT_ROWS rows)
-        rows = []
-        header = ["MAC", "Vendor", "Dest (IP:Port)", "Sightings", "Bytes"]
-        rows.append("\t".join(header))
-        items = list(self.agg.get_children())[:COPY_LIMIT_ROWS]
-        for iid in items:
-            vals = self.agg.item(iid)["values"]
-            rows.append("\t".join(str(v) for v in vals))
-        blob = "=== Aggregates (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows)
-        self._copy_to_clipboard(blob, f"Copied {len(items)} aggregate rows to clipboard")
-
-    # --- [UI|COPY|DEBUG] _copy_debug_bundle ------------------------------------
-    def _copy_debug_bundle(self):
-        # Build a single text payload with:
-        # - Active (top N)
-        # - Aggregates (top N)
-        # - env info (versions & config)
-        # - Top NetFlow flows (if collector is running)
-        # - Tail of traffic_log.csv
-
-        parts = []
-
-        # 1) Env block
-        try:
-            import platform, sys as _sys
-            try:
-                from importlib import metadata as _md
-            except Exception:
-                _md = None
-            puresnmp_ver = "unknown"
-            if _md:
-                try:
-                    puresnmp_ver = _md.version("puresnmp")
-                except Exception:
-                    pass
-            env = [
-                "=== Environment ===",
-                f"Python: {platform.python_version()} ({platform.system()} {platform.release()})",
-                f"puresnmp: {puresnmp_ver}",
-                f"SNMP backend: {get_snmp_backend_name()}",
-                f"Router IP: {ROUTER_IP}",
-                f"Community: {SNMP_COMMUNITY}",
-                f"Poll Interval (s): {POLL_INTERVAL_SECONDS}",
-                f"NetFlow v5 collector: {'ON' if getattr(self, 'nf', None) else 'OFF'} on {NETFLOW_LISTEN_IP}:{NETFLOW_LISTEN_PORT}",
-                "",
-            ]
-            parts.append("\n".join(env))
-        except Exception:
-            pass
-
-        # 2) Active table via core (normalized)
-        header = ["Local", "MAC", "Vendor", "Remote", "State", "First Seen", "Last Seen", "Bytes (TX)", ">1MB?"]
-        rows = ["\t".join(header)]
-
-        def _fmt_local(rec):
-            lip = rec.get("local_ip") or rec.get("src_ip") or ""
-            lpt = rec.get("local_port") or rec.get("src_port")
-            return f"{lip}:{lpt}" if lip and lpt is not None else str(lip)
-
-        def _fmt_remote(rec):
-            rip = rec.get("remote_ip") or rec.get("dst_ip") or ""
-            rpt = rec.get("remote_port") or rec.get("dst_port")
-            host = rec.get("remote_host") or rec.get("rdns") or rec.get("hostname")
-            host_part = f" [{host}]" if host else ""
-            base = f"{rip}{host_part}"
-            return f"{base}:{rpt}" if rip and rpt is not None else base
-
-        def _fmt_bytes(n):
-            try:
-                return str(int(n))
-            except Exception:
-                return str(n or 0)
-
-        recs = self.core.get_active_rows_prepared(limit=COPY_LIMIT_ROWS)
-        for rec in recs:
-            local = _fmt_local(rec)
-            mac = rec.get("local_mac") or ""
-            vendor = rec.get("vendor") or "Unknown"
-            remote = _fmt_remote(rec)
-            state = rec.get("state") or rec.get("tcp_state") or ""
-            first_seen = rec.get("first_seen") or ""
-            last_seen = rec.get("last_seen") or ""
-            raw_bytes = rec.get("bytes") or rec.get("bytes_tx") or 0
-            btx = _fmt_bytes(raw_bytes)
-            over = "Yes" if isinstance(raw_bytes, (int, float)) and raw_bytes >= 1_048_576 else "No"
-            rows.append("\t".join([local, mac, vendor, remote, state, str(first_seen), str(last_seen), btx, over]))
-
-        parts.append("=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows) + "\n")
-
-        # (Optional) add more parts here (aggregates, tail of logs, etc.)
-
-        self._copy_to_clipboard("\n".join(parts), "Debug bundle copied")
-
-    # --- [UI|DEVICE NAME] _display_name ------------------------------------
-    # Purpose: Option A – prefer hostname; fall back to vendor
-    def _display_name(self, local_ip: str | None, mac: str | None) -> str:
-        """Human-friendly name for a device, used in Vendor/Host columns.
-
-        Priority:
-        1) Hostname alias for the IP (managed in the separate 'Manage Hostname Aliases…' dialog)
-        2) Custom device label for the MAC (set via this double-click popup)
-        3) Vendor name for the MAC
-        4) "Unknown"
-        """
-        # 1) IP alias (from host_aliases.json via _HOSTNAMES)
-        try:
-            if local_ip:
-                host = _HOSTNAMES.name_for_ip(local_ip)
-                if host:
-                    return host
-        except Exception:
-            pass
-
-        # 2) Custom MAC label, if set via this dialog
-        try:
-            if mac and hasattr(self, "_get_current_label_for_mac"):
-                lbl = self._get_current_label_for_mac(mac)
-                if lbl:
-                    return lbl
-        except Exception:
-            pass
-
-        # 3) Fallback: vendor name
-        try:
-            return vendor_for_mac(mac) if mac else "Unknown"
-        except Exception:
-            return "Unknown"
-
-
-    # --- [UI|DEBUG] _dump_neighbors_csv ------------------------------------
-    def _dump_neighbors_csv(self):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"neighbors_{ts}.csv"
-        try:
-            rows = []
-            # SNMP view
-            rows.append(["SOURCE","IP","MAC"])
-            for ip, mac in sorted(self.core.ip2mac.items()):
-                rows.append(["SNMP", ip, mac])
-            # SSH view (live snapshot)
-            if isinstance(self.nf, ConntrackCollectorSSH):
-                for ip, mac in self.nf.get_ip_neigh_snapshot():
-                    rows.append(["SSH", ip, mac])
-            with open(fname, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerows(rows)
-            self.status.set(f"Neighbors dumped → {fname}")
-        except Exception as e:
-            self.status.set(f"Dump failed: {e}")
-
     def _on_refresh_rdns_selected(self):
         """Force a reverse-DNS lookup for the selected row's remote IP (Active Connections)."""
         import queue as _q
@@ -3604,12 +3744,13 @@ class App(tk.Tk):
         except Exception:
             pass
         self.destroy()
+
 # endregion UI LAYER
 
 # -------------------- Offline MAC → Vendor resolver (enhanced) --------------------
 
 def _candidate_vendor_files() -> list[Path]:
-    here = Path(__file__).resolve().parent
+    here = BASE_DIR
     return [
         here / "mac-vendor.txt",
         here / "data" / "mac-vendor-overrides.txt",
@@ -3701,7 +3842,7 @@ class _VendorResolver:
         Write the most frequent unknown OUIs to a file for curation.
         """
         if not path:
-            path = Path(__file__).resolve().parent / "unknown_ouis.txt"
+            path = BASE_DIR / "unknown_ouis.txt"
         try:
             lines = [f"{k},{self._unknown_ouis[k]}" for k in sorted(self._unknown_ouis)]
             path.write_text("\n".join(lines), encoding="utf-8")
