@@ -5,6 +5,7 @@
 
 # --- Standard library ---
 import csv
+import ctypes
 import ipaddress
 import json
 import os
@@ -75,8 +76,8 @@ except Exception:
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "5.9"
-VERSION_DATE = "2025.11.18"
+VERSION = "5.10"
+VERSION_DATE = "2025.11.20"
 
 #uaser data defaults
 ENABLE_CONNTRACK_SSH = True   # ← make sure this is here and not commented out
@@ -114,7 +115,20 @@ _DEFAULT_CFG = {
         "agg": {},
         "alerts": {},
     },
+    "details_width": 380,   # default right-hand details panel width in pixels
 }
+
+# ======================================================================
+# UI Layout Tunables (right-hand details panel)
+# Change these to experiment with layout without hunting through code.
+# ======================================================================
+DETAILS_PANEL_WIDTH_DEFAULT  = 290  # default sidebar width in pixels
+DETAILS_WRAP_LENGTH          = 140  # label wrap width for values in details panel
+DETAILS_LABEL_MINSIZE        = 80   # min width of left "label" column ("Destination:", etc.) #110
+DETAILS_VALUE_MINSIZE        = 120  # min width of right value column
+DETAILS_LABEL_PADX           = (4, 4)
+DETAILS_VALUE_PADX           = (0, 4)
+DETAILS_ROW_PADY             = 2
 
 #table highlights
 UNKNOWN_VENDOR_BACKGROUND = "#FFECEC"
@@ -1678,10 +1692,11 @@ from tkinter import ttk
 import tkinter.messagebox as messagebox
 
 class App(tk.Tk):
-    
+
     # --- [UI|INIT] __init__ ------------------------------------
     def __init__(self):
         super().__init__()
+        self._auto_dpi_scaling()
         
         # Load config early so window prefs are available
         self.cfg = self.load_config()       
@@ -1770,27 +1785,65 @@ class App(tk.Tk):
     # =============================================================================
     # region UI WIDGETS
 
-    # --- [UI|LAYOUT] _init_layout ------------------------------------    
-    def _post_build_column_fix(self):
-        """Normalize column #1 widths across the three tables after they exist."""
+    # --- [UI|INIT] _auto_dpi_scaling ------------------------------------
+    def _auto_dpi_scaling(self) -> None:
+        """
+        Automatically adjust Tk scaling based on system DPI.
+
+        On Windows, this uses the system DPI so fonts and widgets are not tiny
+        on high-DPI displays. On other platforms it ensures a sane minimum.
+        """
         try:
-            # Keep in sync with your build_ui constants
-            COL_W_FIRST = 140
-            for tv in (self.alerts, self.tree, self.agg):
+            if sys.platform.startswith("win"):
                 try:
-                    first_col = tv["columns"][0]
-                    tv.column(first_col, width=COL_W_FIRST)
+                    user32 = ctypes.windll.user32
+                    # Try to make this process DPI aware (no-op on some builds)
+                    try:
+                        user32.SetProcessDPIAware()
+                    except Exception:
+                        pass
+
+                    # Prefer GetDpiForSystem if available
+                    try:
+                        dpi = user32.GetDpiForSystem()
+                    except Exception:
+                        # Fallback via GetDeviceCaps
+                        hdc = user32.GetDC(0)
+                        LOGPIXELSX = 88
+                        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, LOGPIXELSX)
+
+                    factor = float(dpi) / 96.0 if dpi else 1.0
+                    # Clamp to a reasonable range
+                    if factor < 1.0:
+                        factor = 1.0
+                    if factor > 2.0:
+                        factor = 2.0
+                    self.tk.call("tk", "scaling", factor)
                 except Exception:
+                    # If anything fails, leave scaling at default
                     pass
+            else:
+                # Non-Windows: ensure at least 1.0 scaling
+                try:
+                    current = float(self.tk.call("tk", "scaling"))
+                except Exception:
+                    current = 1.0
+                if current < 1.0:
+                    self.tk.call("tk", "scaling", 1.0)
         except Exception:
+            # Never let DPI logic break the UI
             pass
 
     # --- [UI|LAYOUT] _init_layout ------------------------------------
     def _init_layout(self):
-        # Build the UI (frames, menus, widgets)
-        self.cfg = self.load_config()
+        """
+        Apply config values to globals and any layout-related settings.
+        Called once after the UI has been built and Tk has computed sizes.
+        """
+        # Apply config from self.cfg (loaded in __init__)
+        cfg = getattr(self, "cfg", {}) or {}
 
-        # Apply config to globals
+        # Make sure we’re updating the same globals the rest of the code uses
         global ROUTER_IP
         global UDM_SSH_HOST
         global ENABLE_CONNTRACK_SSH
@@ -1801,8 +1854,6 @@ class App(tk.Tk):
         global RESOLVE_RDNS
         global ENABLE_TOASTS
         global _TOASTER
-
-        cfg = self.cfg or {}
 
         # Router / SNMP settings
         ROUTER_IP = str(cfg.get("router_ip", ROUTER_IP))
@@ -1838,6 +1889,9 @@ class App(tk.Tk):
             _TOASTER = ToastNotifier() if ENABLE_TOASTS else None
         except Exception:
             _TOASTER = None
+        
+        # (If you later have sash / details-panel placement, it can also live here)
+
 
     # --- [UI|SEARCH] _apply_alert_filter ------------------------------------
     def _apply_alert_filter(self, *_):
@@ -1925,19 +1979,168 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    # --- [CONFIG] load_config ------------------------------------
-    def load_config(self) -> dict:
+    # --- [UI|DETAILS] _build_details_panel ------------------------------------
+    def _build_details_panel(self, parent) -> None:
+        """
+        Build the right-hand details panel that shows information about
+        the currently selected alert/connection/aggregate row.
+        """
+        import tkinter as tk
+        from tkinter import ttk
+
+        # Use tunables so you can experiment easily
+        frame = ttk.LabelFrame(
+            parent,
+            text="Selected Device / Connection",
+            width=DETAILS_PANEL_WIDTH_DEFAULT,
+        )
+        # Minimal padding so it sits close to the table scrollbars
+        frame.pack(fill="both", expand=True, padx=(2, 4), pady=4)
+        self.details_frame = frame
+
+        # Backing StringVars for fields
+        self.detail_table  = getattr(self, "detail_table",  tk.StringVar(value="(none)"))
+        self.detail_when   = getattr(self, "detail_when",   tk.StringVar(value=""))
+        self.detail_ip     = getattr(self, "detail_ip",     tk.StringVar(value=""))
+        self.detail_mac    = getattr(self, "detail_mac",    tk.StringVar(value=""))
+        self.detail_vendor = getattr(self, "detail_vendor", tk.StringVar(value=""))
+        self.detail_name   = getattr(self, "detail_name",   tk.StringVar(value=""))
+        self.detail_dest   = getattr(self, "detail_dest",   tk.StringVar(value=""))
+        self.detail_bytes  = getattr(self, "detail_bytes",  tk.StringVar(value=""))
+        self.detail_note   = getattr(self, "detail_note",   tk.StringVar(value=""))
+
+        rows = [
+            ("Source",       self.detail_table),
+            ("IP address",   self.detail_ip),
+            ("MAC address",  self.detail_mac),
+            ("Vendor",       self.detail_vendor),
+            ("Name / alias", self.detail_name),
+            ("Destination",  self.detail_dest),
+            ("Bytes",        self.detail_bytes),
+            ("When",         self.detail_when),
+            ("Note",         self.detail_note),
+        ]
+
+        for r, (label, var) in enumerate(rows):
+            ttk.Label(frame, text=label + ":").grid(
+                row=r,
+                column=0,
+                sticky="nw",
+                padx=DETAILS_LABEL_PADX,
+                pady=DETAILS_ROW_PADY,
+            )
+            ttk.Label(
+                frame,
+                textvariable=var,
+                anchor="w",
+                wraplength=DETAILS_WRAP_LENGTH,
+                justify="left",
+            ).grid(
+                row=r,
+                column=1,
+                sticky="nw",
+                padx=DETAILS_VALUE_PADX,
+                pady=DETAILS_ROW_PADY,
+            )
+
+        # Column 0: small, fixed-ish label column
+        frame.columnconfigure(0, weight=0, minsize=DETAILS_LABEL_MINSIZE)
+        # Column 1: value column that grows and wraps
+        frame.columnconfigure(1, weight=1, minsize=DETAILS_VALUE_MINSIZE)
+
+    # --- [UI|DETAILS] _wrap_friendly_uri ---------------------------------------
+    def _wrap_friendly_uri(self, uri: str) -> str:
+        """
+        Insert zero-width break hints into a URI/hostname so the Tk label
+        can wrap nicely at dots and slashes, without visually changing
+        the string.
+        """
+        s = str(uri)
+        # Zero-width space (U+200B) after '.' and '/'
+        s = s.replace(".", ".\u200b")
+        s = s.replace("/", "/\u200b")
+        return s
+        
+    # --- [UI|DETAILS] _update_details_from_tree --------------------------------
+    def _update_details_from_tree(self, tree, table_name: str) -> None:
+        """
+        Update the right-hand details panel from the currently selected row
+        in a Treeview.
+        """
+        from tkinter import ttk
         try:
-            if CONFIG_FILE.exists():
-                with CONFIG_FILE.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # shallow-merge with defaults so new keys appear automatically
-                out = dict(_DEFAULT_CFG)
-                out.update(data if isinstance(data, dict) else {})
-                return out
+            if not isinstance(tree, ttk.Treeview):
+                return
+            selection = tree.selection()
+            if not selection:
+                return
+            iid = selection[0]
+            cols = list(tree["columns"])
+            values = tree.item(iid, "values") or ()
+            row = {
+                col: (values[idx] if idx < len(values) else "")
+                for idx, col in enumerate(cols)
+            }
         except Exception:
+            return
+
+        # Derive common fields
+        src = table_name
+        local = row.get("local", "")
+        dest = row.get("dest", row.get("destination", ""))
+        mac = row.get("mac", row.get("client_mac", ""))
+        vendor = row.get("vendor", "")
+        bytes_val = (
+            row.get("bytes")
+            or row.get("Total Bytes")
+            or row.get("bytes_tx")
+            or ""
+        )
+        note = row.get("note", "")
+
+        # IP from local field "ip[:port]" or "ip [host]:port"
+        ip = ""
+        if isinstance(local, str) and local:
+            base = local.split()[0]
+            ip = base.split(":", 1)[0]
+
+        when = ""
+        if "time" in row:
+            when = row.get("time", "")
+        elif "last" in row:
+            when = row.get("last", "")
+        elif "first" in row:
+            when = row.get("first", "")
+
+        # Keep When as a single string now that it's no longer the problem
+        when_display = str(when)
+
+        # Friendly name / alias via DeviceNamer, if available
+        name = ""
+        try:
+            namer = getattr(self.core, "namer", None)
+            if namer is not None:
+                name = namer.name_for(mac or None, ip or None) or ""
+        except Exception:
+            name = ""
+
+        # Make destination wrap-friendly (dots and slashes)
+        dest_display = self._wrap_friendly_uri(dest)
+
+        # Push into the StringVars
+        try:
+            self.detail_table.set(str(src).capitalize())
+            self.detail_ip.set(str(ip))
+            self.detail_mac.set(str(mac))
+            self.detail_vendor.set(str(vendor))
+            self.detail_name.set(str(name))
+            self.detail_dest.set(dest_display)
+            self.detail_bytes.set(str(bytes_val))
+            self.detail_when.set(when_display)
+            self.detail_note.set(str(note))
+        except Exception:
+            # If details panel not yet built, ignore
             pass
-        return dict(_DEFAULT_CFG)
 
     # --- [UI] notify ------------------------------------
     def notify(self, title, msg):
@@ -1947,13 +2150,19 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-    # --- [CONFIG] save_config ------------------------------------    
-    def save_config(self,cfg: dict) -> None:
+    # --- [UI|LAYOUT] _post_build_column_fix ------------------------------------    
+    def _post_build_column_fix(self):
+        """Normalize column #1 widths across the three tables after they exist."""
         try:
-            with CONFIG_FILE.open("w", encoding="utf-8") as f:
-                json.dump(cfg or {}, f, indent=2, sort_keys=True)
+            # Keep in sync with your build_ui constants
+            COL_W_FIRST = 140
+            for tv in (self.alerts, self.tree, self.agg):
+                try:
+                    first_col = tv["columns"][0]
+                    tv.column(first_col, width=COL_W_FIRST)
+                except Exception:
+                    pass
         except Exception:
-            # don't crash UI if disk write fails
             pass
 
     # --- [UI|LAYOUT] _center_window ------------------------------------
@@ -2250,7 +2459,7 @@ class App(tk.Tk):
             self.cfg["enable_toasts"]               = bool(toasts_var.get())
 
             # Persist to config.json
-            self.save_config(self.cfg)
+            self.save_config()
 
             # Apply immediately where safe
             global ROUTER_IP, UDM_SSH_HOST
@@ -2365,7 +2574,7 @@ class App(tk.Tk):
         tv["show"] = "headings"
 
     # --- [UI|BUILD] _build_ui --------------------------------------------------
-    # Purpose: MENUBAR + CONTENT (Alerts + Active + Aggregates)
+    # Purpose: MENUBAR + CONTENT (Alerts + Active + Aggregates + Details)
     #          + STATUS (bottom) + FOOTER (above status)
     def _build_ui(self):
         import tkinter as tk
@@ -2415,39 +2624,7 @@ class App(tk.Tk):
             tv.after_idle(_reassert)
 
         # =========================================================================
-        # === Statusbar (very bottom) =============================================
-        # =========================================================================
-        statusf = ttk.Frame(self)
-        statusf.pack(side="bottom", fill="x", padx=8, pady=(2, 4))
-
-        # Left side: note + status text (what used to be the top bar)
-        note_label = ttk.Label(statusf, textvariable=self.note, anchor="w")
-        note_label.pack(side="left", fill="x", expand=True)
-
-        status_label = ttk.Label(statusf, textvariable=self.status, anchor="w")
-        status_label.pack(side="left", padx=(8, 0))
-
-        # Right side: metrics
-        self.status_conn = tk.StringVar(value="Active: 0 | MACs: 0")
-        self.status_flow = tk.StringVar(value="Flow: off")
-        self.status_ssh = tk.StringVar(value="SSH: off")
-        self.status_clock = tk.StringVar(value="Clock: n/a")
-
-        ttk.Label(statusf, textvariable=self.status_conn, anchor="e").pack(
-            side="right", padx=(8, 0)
-        )
-        ttk.Label(statusf, textvariable=self.status_flow, anchor="e").pack(
-            side="right", padx=(8, 0)
-        )
-        ttk.Label(statusf, textvariable=self.status_ssh, anchor="e").pack(
-            side="right", padx=(8, 0)
-        )
-        ttk.Label(statusf, textvariable=self.status_clock, anchor="e").pack(
-            side="right", padx=(8, 0)
-        )
-
-        # =========================================================================
-        # === FOOTER (just above statusbar) ======================================
+        # === FOOTER (buttons above statusbar) ====================================
         # =========================================================================
         foot = ttk.Frame(self)
         foot.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
@@ -2498,16 +2675,66 @@ class App(tk.Tk):
         ).pack(side="left", padx=(8, 12))
 
         # =========================================================================
+        # === Statusbar (very bottom) =============================================
+        # =========================================================================
+        statusf = ttk.Frame(self)
+        statusf.pack(side="bottom", fill="x", padx=8, pady=(2, 4))
+
+        # Left side: note + status text
+        note_label = ttk.Label(statusf, textvariable=self.note, anchor="w")
+        note_label.pack(side="left", fill="x", expand=True)
+
+        status_label = ttk.Label(statusf, textvariable=self.status, anchor="w")
+        status_label.pack(side="left", padx=(8, 0))
+
+        # Right side: metrics
+        self.status_conn = tk.StringVar(value="Active: 0 | MACs: 0")
+        self.status_flow = tk.StringVar(value="Flow: off")
+        self.status_ssh = tk.StringVar(value="SSH: off")
+        self.status_clock = tk.StringVar(value="Clock: n/a")
+
+        ttk.Label(statusf, textvariable=self.status_conn, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Label(statusf, textvariable=self.status_flow, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Label(statusf, textvariable=self.status_ssh, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Label(statusf, textvariable=self.status_clock, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+
+        # =========================================================================
         # === UI.CONTENT (everything that scrolls/expands) ========================
         # =========================================================================
-        content = ttk.Frame(self)
-        content.pack(fill="both", expand=True)  # fills the space ABOVE the fixed bottom area
+        # Outer horizontal paned: left = tables, right = details panel
+        main_paned = ttk.PanedWindow(self, orient="horizontal")
+        # Tighten padding so sidebar sits closer to the tables
+        main_paned.pack(fill="both", expand=True, padx=2, pady=2)
+        self.main_paned = main_paned  # keep a reference so we can restore sash
+        self.main_paned.bind("<B1-Motion>", self._on_sash_drag)
 
+        # Left content (tables)
+        content = ttk.Frame(main_paned)
+        main_paned.add(content, weight=3)
+
+        # Inside left content: vertical paned for Alerts + Active
+        # Less right padding so the right edge is close to the sash
         paned = ttk.PanedWindow(content, orient="vertical")
-        paned.pack(fill="both", expand=True, padx=8, pady=4)
+        paned.pack(fill="both", expand=True, padx=(8, 0), pady=4)
+
+        # Right-hand details panel (width hint; acts like fixed sidebar)
+        details_outer = ttk.Frame(main_paned, width=380)
+        main_paned.add(details_outer, weight=0)
+        self._build_details_panel(details_outer)
+
+        # Kick off restoration of details width from config
+        self.after(50, self._restore_details_width)
 
         # =========================================================================
-        # === Alerts SECTION (top of content) =====================================
+        # === Alerts SECTION (top of left content) ================================
         # =========================================================================
         alert_outer = ttk.Frame(paned)
         paned.add(alert_outer, weight=1)
@@ -2530,8 +2757,10 @@ class App(tk.Tk):
         entry = ttk.Entry(filter_row, textvariable=self.alert_filter_var, width=30)
         entry.pack(side="left", padx=(4, 8))
 
-        # live filtering as the user types
-        self.alert_filter_var.trace_add("write", lambda *args: self._apply_alert_filter())
+        # live filtering as the user types (global across all tables)
+        self.alert_filter_var.trace_add(
+            "write", lambda *args: self._apply_alert_filter()
+        )
 
         ttk.Button(
             filter_row,
@@ -2576,15 +2805,26 @@ class App(tk.Tk):
         scry1 = ttk.Scrollbar(alertf, orient="vertical", command=self.alerts.yview)
         self.alerts.configure(yscrollcommand=scry1.set)
         self.alerts.pack(side="left", fill="both", expand=True, pady=8)
-        scry1.pack(side="left", fill="y", padx=(0, 8), pady=8)
+        scry1.pack(side="left", fill="y", padx=(0, 4), pady=8)  # smaller gap to the right
 
         if hasattr(self, "_bind_edit_on_doubleclick"):
-            self._bind_edit_on_doubleclick(self.alerts, mac_col="mac", vendor_col="vendor", local_col="local")
+            self._bind_edit_on_doubleclick(
+                self.alerts,
+                mac_col="mac",
+                vendor_col="vendor",
+                local_col="local",
+            )
 
         self.alerts.bind("<Button-3>", self._on_right_click_active)
 
+        # Update details panel when selection changes in Alerts
+        self.alerts.bind(
+            "<<TreeviewSelect>>",
+            lambda e: self._update_details_from_tree(self.alerts, "alerts"),
+        )
+
         # =========================================================================
-        # === Active Connections SECTION (middle) =================================
+        # === Active Connections SECTION (middle of left content) =================
         # =========================================================================
         active_outer = ttk.Frame(paned)
         paned.add(active_outer, weight=2)
@@ -2648,15 +2888,26 @@ class App(tk.Tk):
         scry2 = ttk.Scrollbar(midf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scry2.set)
         self.tree.pack(side="left", fill="both", expand=True, pady=8)
-        scry2.pack(side="left", fill="y", padx=(0, 8), pady=8)
+        scry2.pack(side="left", fill="y", padx=(0, 4), pady=8)  # smaller gap
 
         if hasattr(self, "_bind_edit_on_doubleclick"):
-            self._bind_edit_on_doubleclick(self.tree, mac_col="mac", vendor_col="vendor", local_col="local")
+            self._bind_edit_on_doubleclick(
+                self.tree,
+                mac_col="mac",
+                vendor_col="vendor",
+                local_col="local",
+            )
         if hasattr(self, "_apply_state_visibility"):
             self._apply_state_visibility()
 
+        # Update details panel when selection changes in Active
+        self.tree.bind(
+            "<<TreeviewSelect>>",
+            lambda e: self._update_details_from_tree(self.tree, "active"),
+        )
+
         # =========================================================================
-        # === Aggregates SECTION (bottom of content) ==============================
+        # === Aggregates SECTION (bottom of left content) =========================
         # =========================================================================
         agg_outer = ttk.Frame(content)
         agg_outer.pack(fill="both", expand=False, padx=8, pady=(0, 4))
@@ -2680,7 +2931,12 @@ class App(tk.Tk):
             "bytes":     "Total Bytes",
         }
 
-        self.agg = ttk.Treeview(aggf, columns=tuple(agg_labels), show="headings", height=8,)
+        self.agg = ttk.Treeview(
+            aggf,
+            columns=tuple(agg_labels),
+            show="headings",
+            height=8,
+        )
         _force_headings(self.agg, agg_labels)
 
         self._setup_sorting(
@@ -2706,10 +2962,21 @@ class App(tk.Tk):
         scry3 = ttk.Scrollbar(aggf, orient="vertical", command=self.agg.yview)
         self.agg.configure(yscrollcommand=scry3.set)
         self.agg.pack(side="left", fill="both", expand=True, pady=8)
-        scry3.pack(side="left", fill="y", padx=(0, 8), pady=8)
+        scry3.pack(side="left", fill="y", padx=(0, 4), pady=8)  # smaller gap
 
         if hasattr(self, "_bind_edit_on_doubleclick"):
-            self._bind_edit_on_doubleclick(self.agg, mac_col="mac", vendor_col="vendor", local_col=None)
+            self._bind_edit_on_doubleclick(
+                self.agg,
+                mac_col="mac",
+                vendor_col="vendor",
+                local_col=None,
+            )
+
+        # Update details panel when selection changes in Aggregates
+        self.agg.bind(
+            "<<TreeviewSelect>>",
+            lambda e: self._update_details_from_tree(self.agg, "agg"),
+        )
 
         self._post_build_column_fix()
 
@@ -2927,6 +3194,30 @@ class App(tk.Tk):
         d = getattr(self, "_mac_labels", None) or {}
         return d.get(mac.upper(), "")
 
+    # --- [UI] _on_sash_drag ------------------------------------
+    def _on_sash_drag(self, event=None):
+        """
+        Live-update the stored panel width while dragging the sash,
+        so config.json gets correct values before exit.
+        """
+        try:
+            paned = getattr(self, "main_paned", None)
+            if paned is None:
+                return
+
+            total = paned.winfo_width()
+            left = paned.sashpos(0)   # width of table area
+            width = max(0, total - left)
+
+            # store live value
+            self.cfg["details_width"] = int(width)
+
+            # optional: debug to console
+            # print("[LIVE WIDTH]", width)
+
+        except Exception:
+            pass
+
     # --- [UI] _open_edit_dialog ------------------------------------
     def _open_edit_dialog(self, mac_initial: str, ip_initial: str) -> tuple[str, str] | None:
         """Modal dialog to edit a custom device label for a MAC address.
@@ -3023,6 +3314,30 @@ class App(tk.Tk):
             return hp.rsplit(":", 1)[0]
         except Exception:
             return ""
+
+    # --- [UI|DRAG DIVIDOR EVENT] _on_sash_drag ----------------------------------------------
+    def _on_sash_drag(self, event=None):
+        """
+        Live-update the stored details panel width while dragging the sash.
+        This only updates self.cfg in memory; config.json is still written
+        on close via _on_close → save_config.
+        """
+        try:
+            paned = getattr(self, "main_paned", None)
+            if paned is None:
+                return
+
+            total = paned.winfo_width()
+            left = paned.sashpos(0)          # width of the left (tables) pane
+            details_width = max(0, total - left)
+
+            self.cfg["details_width"] = int(details_width)
+
+            # Optional: live debug while tuning
+            # print("[LIVE details_width]", self.cfg["details_width"])
+
+        except Exception:
+            pass
 
     # --- [UI] _set_label_for_mac ------------------------------------
     def _set_label_for_mac(self, mac: str, label: str) -> None:
@@ -3279,10 +3594,69 @@ class App(tk.Tk):
         lines = ["# OUI,count"] + [f"{k},{v}" for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
         self._copy_to_clipboard("\n".join(lines), "Unknown vendor OUIs copied.")
 
+    # --- [CONFIG] load_config ------------------------------------
+    def load_config(self) -> dict:
+        """
+        Load config.json into memory. Falls back to defaults if missing
+        or malformed. Never raises.
+        """
+        try:
+            if CONFIG_FILE.exists():
+                with CONFIG_FILE.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return {**_DEFAULT_CFG, **data}
+        except Exception:
+            pass
+        return dict(_DEFAULT_CFG)
+
+    # --- [CONFIG] save_config ------------------------------------
+    def save_config(self, cfg: dict | None = None) -> None:
+        """
+        Persist runtime config to disk including window geometry,
+        state, and panel width values stored in self.cfg.
+
+        If cfg is provided, that dict is written; otherwise self.cfg is used.
+        This keeps it compatible with older call sites that did
+        save_config(self.cfg).
+        """
+        try:
+            # Use caller-provided cfg or fallback to self.cfg
+            if cfg is None:
+                cfg = getattr(self, "cfg", None)
+            if not isinstance(cfg, dict):
+                return
+
+            # 1) Update window props before saving
+            try:
+                cfg["window_geometry"] = self.geometry()
+            except Exception:
+                pass
+
+            try:
+                cfg["window_state"] = "zoomed" if self.state() == "zoomed" else "normal"
+            except Exception:
+                cfg["window_state"] = "normal"
+
+            # 2) (Optional) update details width from the actual panel if you want
+            try:
+                if hasattr(self, "details_panel"):
+                    cfg["details_width"] = int(self.details_panel.winfo_width())
+            except Exception:
+                pass
+
+            # 3) Actually write config to disk
+            with CONFIG_FILE.open("w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, sort_keys=True)
+
+        except Exception:
+            # don't crash UI if disk write fails
+            pass
+
+
     # --- [UI|LIFECYCLE] _on_close ----------------------------------
     def _on_close(self):
-        
-        """Persist window + column layout, then close the app."""
+        """Persist window + column layout (including details panel width), then close the app."""
         try:
             # 1) Snapshot geometry + state
             try:
@@ -3317,7 +3691,22 @@ class App(tk.Tk):
             _capture("agg", getattr(self, "agg", None))
             _capture("alerts", getattr(self, "alerts", None))
 
-            # 3) Save config to disk
+            # 3) Snapshot details panel width from the horizontal paned window
+            try:
+                paned = getattr(self, "main_paned", None)  # the outer PanedWindow with tables + details
+                if paned is not None:
+                    total = paned.winfo_width()
+                    # sashpos(0) gives width of the LEFT pane (tables)
+                    left_w = paned.sashpos(0)
+                    details_width = max(0, total - left_w)
+                    if details_width > 0:
+                        self.cfg["details_width"] = int(details_width)
+                        print("DEBUG details_width:", self.cfg["details_width"])
+            except Exception:
+                # don't let a layout issue break closing
+                pass
+
+            # 4) Save config to disk
             self.save_config(self.cfg)
 
         except Exception:
@@ -3446,7 +3835,7 @@ class App(tk.Tk):
     def _on_toggle_show_idle(self) -> None:
         """Persist the 'Show idle devices' toggle to config.json."""
         self.cfg["show_idle_devices"] = bool(self.show_idle_var.get())
-        self.save_config(self.cfg)
+        self.save_config()
         # Force a quick repaint so the table reflects the new filter
         self.after(10, self._refresh_ui)
 
@@ -3503,7 +3892,7 @@ class App(tk.Tk):
         self.cfg["resolve_rdns"] = new_val
     
         # Persist to config.json
-        self.save_config(self.cfg)
+        self.save_config()
     
         # Apply to global used by DNS worker
         global RESOLVE_RDNS
@@ -3851,6 +4240,49 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+    # --- [UI|DETAILS] _restore_details_width -----------------------------------
+    def _restore_details_width(self) -> None:
+        """
+        Restore the horizontal sash position so the right-hand details panel
+        uses the width from config (self.cfg['details_width']).
+
+        Called after the UI is built and geometry is known.
+        """
+        try:
+            paned = getattr(self, "main_paned", None)
+            if paned is None:
+                return
+
+            # If the paned hasn't been laid out yet, try again shortly.
+            total = paned.winfo_width()
+            if total <= 1:
+                self.after(50, self._restore_details_width)
+                return
+
+            cfg = getattr(self, "cfg", {}) or {}
+            try:
+                details_width = int(cfg.get("details_width", 380))
+            except Exception:
+                details_width = 380
+
+            # Clamp details width so it can't consume everything or vanish
+            min_details = 260
+            max_details = max(min_details, total - 400)
+            details_width = max(min_details, min(details_width, max_details))
+
+            # sash position (index 0) is the width of the left pane
+            sashpos = total - details_width
+            if sashpos < 300:
+                sashpos = 300  # leave enough room for the tables
+
+            try:
+                paned.sashpos(0, sashpos)
+            except Exception:
+                pass
+        except Exception:
+            # Never let UI restoration crash
+            pass
+
     # --- [UI|CONFIG] _toggle_conntrack_ssh ------------------------------------
     def _toggle_conntrack_ssh(self) -> None:
         """Toggle the 'enable_conntrack_ssh' setting and persist to config."""
@@ -3859,7 +4291,7 @@ class App(tk.Tk):
         current = bool(self.cfg.get("enable_conntrack_ssh", ENABLE_CONNTRACK_SSH))
         new_val = not current
         self.cfg["enable_conntrack_ssh"] = new_val
-        self.save_config(self.cfg)
+        self.save_config()
 
         ENABLE_CONNTRACK_SSH = new_val
 
@@ -3876,7 +4308,7 @@ class App(tk.Tk):
         current = bool(self.cfg.get("enable_netflow_v5_collector", ENABLE_NETFLOW_V5_COLLECTOR))
         new_val = not current
         self.cfg["enable_netflow_v5_collector"] = new_val
-        self.save_config(self.cfg)
+        self.save_config()
 
         ENABLE_NETFLOW_V5_COLLECTOR = new_val
 

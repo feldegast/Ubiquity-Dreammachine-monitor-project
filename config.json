@@ -23,20 +23,21 @@
       "dest": 420,
       "local": 160,
       "mac": 160,
-      "note": 235,
+      "note": 213,
       "time": 140,
       "vendor": 220
     }
   },
   "copy_limit_rows": 200,
   "debug_log_tail_lines": 200,
+  "details_width": 291,
   "enable_conntrack_ssh": true,
   "enable_netflow_v5_collector": false,
   "enable_toasts": false,
   "poll_interval_seconds": 5,
   "resolve_rdns": true,
   "router_ip": "192.168.1.1",
-  "show_idle_devices": true,
-  "window_geometry": "1488x964+216+0",
+  "show_idle_devices": false,
+  "window_geometry": "1748x964+141+8",
   "window_state": "normal"
 }
