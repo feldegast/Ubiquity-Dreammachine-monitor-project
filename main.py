@@ -1696,6 +1696,8 @@ class App(tk.Tk):
     # --- [UI|INIT] __init__ ------------------------------------
     def __init__(self):
         super().__init__()
+        
+        # Apply DPI scaling before we build any UI or set fonts
         self._auto_dpi_scaling()
         
         # Load config early so window prefs are available
@@ -2988,12 +2990,42 @@ class App(tk.Tk):
 
 # endregion UI WIDGETS
 
-# =============================================================================
-# SECTION: UI CONTROLLER (events, handlers, refresh loop)
-# =============================================================================
-# region UI CONTROLLER
+    # =============================================================================
+    # SECTION: UI CONTROLLER (events, handlers, refresh loop)
+    # =============================================================================
+    # region UI CONTROLLER
 
-# --- [HELPERS|ALIAS/VENDOR LABELS] -----------------------------------------
+    # --- [HELPERS|ALIAS/VENDOR LABELS] -----------------------------------------
+    
+    # --- [UI|DPI] _auto_dpi_scaling ------------------------------------
+    def _auto_dpi_scaling(self) -> None:
+        """
+        Automatically adjust Tk scaling based on the system DPI.
+
+        On Windows, 96 DPI is "normal" (100%). We query how many pixels Tk
+        thinks are in 1 inch ("1i") and scale relative to 96.
+        """
+        try:
+            # How many pixels are in 1 inch according to Tk?
+            pixels_per_inch = float(self.winfo_fpixels("1i"))
+            if pixels_per_inch <= 0:
+                return
+
+            # 96 px/inch is the standard baseline (100% scaling)
+            scale = pixels_per_inch / 96.0
+
+            # Clamp to something sane so weird environments don't explode
+            scale = max(0.75, min(scale, 2.5))
+
+            # Apply to Tk's global scaling (affects fonts and some geometry)
+            self.call("tk", "scaling", scale)
+
+            # Optional debug:
+            # print(f"[DPI] pixels_per_inch={pixels_per_inch:.2f}, scale={scale:.2f}")
+
+        except Exception:
+            # Never crash if DPI probing fails
+            pass
 
     # --- [UI] _apply_state_visibility ------------------------------------
     def _apply_state_visibility(self):
