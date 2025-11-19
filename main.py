@@ -5,6 +5,7 @@
 
 # --- Standard library ---
 import csv
+import ipaddress
 import json
 import os
 import queue
@@ -14,10 +15,9 @@ import struct
 import sys
 import threading
 import time
+import webbrowser
+
 from datetime import datetime
-
-import ipaddress
-
 from collections import defaultdict
 from importlib import import_module
 from pathlib import Path
@@ -106,9 +106,20 @@ _DEFAULT_CFG = {
     "debug_log_tail_lines": DEBUG_LOG_TAIL_LINES,
     "enable_toasts": ENABLE_TOASTS,   # keep False unless you really want the Win hook
     # add any other user-tunable settings here
+    
+    "window_geometry": None,        # e.g. "1488x964+100+50"
+    "window_state": "normal",       # "normal" or "zoomed"
+    "column_widths": {              # per-table column widths
+        "active": {},
+        "agg": {},
+        "alerts": {},
+    },
 }
 
-
+#table highlights
+UNKNOWN_VENDOR_BACKGROUND = "#FFECEC"
+HIGH_VOLUME_BACKGROUND    = "#D2F5FF"
+NEW_DEVICE_BACKGROUND     = "#F7FFD2"
 
 # --- Enable SSH conntrack collector ---
 SSH_SECRETS_FILE = "ssh_secrets.json"
@@ -1671,10 +1682,31 @@ class App(tk.Tk):
     # --- [UI|INIT] __init__ ------------------------------------
     def __init__(self):
         super().__init__()
-        self.title(f"{APP_NAME} — {VERSION} ({VERSION_DATE})")
-        self.geometry("1280x860")   # a little taller so footer is visible
-        self.minsize(1100, 650)
         
+        # Load config early so window prefs are available
+        self.cfg = self.load_config()       
+
+        self.title(f"{APP_NAME} — {VERSION} ({VERSION_DATE})")
+
+        # 1) Restore window geometry if saved
+        default_geo = "1488x964"   # your WinSpy size
+        geo = self.cfg.get("window_geometry") or default_geo
+        try:
+            self.geometry(geo)
+        except Exception:
+            self.geometry(default_geo)
+        
+        # 2) Enforce min size
+        self.minsize(1100, 650)
+
+        # 3) Restore state (normal / zoomed)
+        state = self.cfg.get("window_state", "normal")
+        if state == "zoomed":
+            try:
+                self.state("zoomed")
+            except Exception:
+                pass
+
         # --- placeholders so attributes always exist ---
         self.top = None
         self.paned = None
@@ -1726,6 +1758,10 @@ class App(tk.Tk):
         
         self.thread = threading.Thread(target=self.core.run, daemon=True)
         self.thread.start()
+        
+        # Ensure we save prefs on close
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # Kick off the refresh loop AFTER widgets exist
         self.after(100, self._refresh_ui)
     
@@ -1751,8 +1787,6 @@ class App(tk.Tk):
 
     # --- [UI|LAYOUT] _init_layout ------------------------------------
     def _init_layout(self):
-    # --- [UI|LAYOUT] _init_layout ------------------------------------
-
         # Build the UI (frames, menus, widgets)
         self.cfg = self.load_config()
 
@@ -1804,6 +1838,92 @@ class App(tk.Tk):
             _TOASTER = ToastNotifier() if ENABLE_TOASTS else None
         except Exception:
             _TOASTER = None
+
+    # --- [UI|SEARCH] _apply_alert_filter ------------------------------------
+    def _apply_alert_filter(self, *_):
+        """
+        Filter all three tables (Alerts, Active, Aggregates) using the text
+        in self.alert_filter_var. Matches on any visible column text.
+        """
+        sv = getattr(self, "alert_filter_var", None)
+        pattern = (sv.get() if sv is not None else "") or ""
+        pattern = pattern.strip().lower()
+
+        # Tables to filter: (name, treeview attribute)
+        tables = [
+            ("alerts", getattr(self, "alerts", None)),
+            ("active", getattr(self, "tree", None)),
+            ("agg",    getattr(self, "agg", None)),
+        ]
+
+        # Helper: ensure we have a detached-list for each table
+        def _get_detached(name: str):
+            attr = f"_detached_{name}"
+            if not hasattr(self, attr):
+                setattr(self, attr, [])
+            return getattr(self, attr), attr
+
+        # If filter is empty, just reattach anything we've previously detached
+        if not pattern:
+            for name, tv in tables:
+                if tv is None:
+                    continue
+                detached, attr = _get_detached(name)
+                for iid in list(detached):
+                    try:
+                        tv.reattach(iid, "", "end")
+                    except Exception:
+                        pass
+                setattr(self, attr, [])
+            return
+
+        # Non-empty pattern: reattach everything we know about, then detach non-matching
+        for name, tv in tables:
+            if tv is None:
+                continue
+
+            detached, attr = _get_detached(name)
+
+            # 1) Reattach anything previously detached so we start from full set
+            for iid in list(detached):
+                try:
+                    tv.reattach(iid, "", "end")
+                except Exception:
+                    pass
+            detached.clear()
+
+            # 2) Walk all rows and detach those that don't match
+            for iid in tv.get_children(""):
+                try:
+                    vals = tv.item(iid, "values")
+                except Exception:
+                    continue
+
+                text = " ".join(str(v).lower() for v in vals)
+                if pattern not in text:
+                    try:
+                        tv.detach(iid)
+                        detached.append(iid)
+                    except Exception:
+                        continue
+
+    # --- [UI|LAYOUT] _apply_saved_column_widths ---------------------
+    def _apply_saved_column_widths(self, table_name: str, tv: ttk.Treeview) -> None:
+        """Apply per-column widths loaded from config to a Treeview."""
+        try:
+            cfg = self.cfg or {}
+            col_cfg = cfg.get("column_widths", {})
+            widths = col_cfg.get(table_name) or {}
+            if not widths:
+                return
+            for cid, w in widths.items():
+                if cid in tv["columns"]:
+                    try:
+                        tv.column(cid, width=int(w))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     # --- [CONFIG] load_config ------------------------------------
     def load_config(self) -> dict:
@@ -2193,7 +2313,7 @@ class App(tk.Tk):
 
         # File
         file_menu = tk.Menu(menubar, tearoff=False)
-        file_menu.add_command(label="Exit", command=self._on_exit)
+        file_menu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=file_menu)
         
         view_menu = tk.Menu(menubar, tearoff=False)
@@ -2243,24 +2363,34 @@ class App(tk.Tk):
         tv["columns"] = cols_tuple
         tv["displaycolumns"] = cols_tuple
         tv["show"] = "headings"
-                    
+
     # --- [UI|BUILD] _build_ui --------------------------------------------------
-    # Purpose: MENUBAR + TOP (note/status) + CONTENT (Alerts + Active + Aggregates)
-    #          + STATUS (bottom) + FOOTER (bottom)
+    # Purpose: MENUBAR + CONTENT (Alerts + Active + Aggregates)
+    #          + STATUS (bottom) + FOOTER (above status)
     def _build_ui(self):
         import tkinter as tk
         from tkinter import ttk
-    
+
         # ----- wipe existing widgets (hot reload safety) -----
         for child in self.winfo_children():
-            try: child.destroy()
-            except Exception: pass
-    
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+        # Ensure note/status vars exist
+        if not hasattr(self, "note"):
+            self.note = tk.StringVar(value="")
+        if not hasattr(self, "status"):
+            self.status = tk.StringVar(value="Ready")
+
         # ----- menubar (optional) -----
         if hasattr(self, "_build_menu"):
-            try: self._build_menu()
-            except Exception: pass
-    
+            try:
+                self._build_menu()
+            except Exception:
+                pass
+
         # ===== shared widths so first 4 columns align across tables =====
         COL_W_FIRST = 140
         COL_W_MAC   = 160
@@ -2269,7 +2399,7 @@ class App(tk.Tk):
         COL_W_LOCAL = 160
         COL_W_LAST  = 140
         COL_W_BYTES = 110
-    
+
         def _force_headings(tv: ttk.Treeview, labels: dict[str, str]):
             cols = tuple(labels.keys())
             tv["columns"] = cols
@@ -2277,73 +2407,141 @@ class App(tk.Tk):
             tv["show"] = "headings"
             for cid, txt in labels.items():
                 tv.heading(cid, text=txt)
+
             def _reassert():
                 for cid, txt in labels.items():
                     tv.heading(cid, text=txt)
+
             tv.after_idle(_reassert)
-    
+
         # =========================================================================
-        # === UI.BOTTOM (fixed bottom: STATUS + FOOTER) ===========================
+        # === Statusbar (very bottom) =============================================
         # =========================================================================
-        # pack bottom things FIRST so they stay docked at the bottom
-        statusf = ttk.Frame(self); statusf.pack(side="bottom", fill="x", padx=8, pady=(0,4))
-        self.bottom_status = tk.StringVar(value="Ready.")
-        ttk.Label(statusf, textvariable=self.bottom_status, anchor="w").pack(side="left", fill="x", expand=True)
-    
-        foot = ttk.Frame(self); foot.pack(side="bottom", fill="x", padx=8, pady=(0,6))
+        statusf = ttk.Frame(self)
+        statusf.pack(side="bottom", fill="x", padx=8, pady=(2, 4))
+
+        # Left side: note + status text (what used to be the top bar)
+        note_label = ttk.Label(statusf, textvariable=self.note, anchor="w")
+        note_label.pack(side="left", fill="x", expand=True)
+
+        status_label = ttk.Label(statusf, textvariable=self.status, anchor="w")
+        status_label.pack(side="left", padx=(8, 0))
+
+        # Right side: metrics
+        self.status_conn = tk.StringVar(value="Active: 0 | MACs: 0")
+        self.status_flow = tk.StringVar(value="Flow: off")
+        self.status_ssh = tk.StringVar(value="SSH: off")
+        self.status_clock = tk.StringVar(value="Clock: n/a")
+
+        ttk.Label(statusf, textvariable=self.status_conn, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Label(statusf, textvariable=self.status_flow, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Label(statusf, textvariable=self.status_ssh, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Label(statusf, textvariable=self.status_clock, anchor="e").pack(
+            side="right", padx=(8, 0)
+        )
+
+        # =========================================================================
+        # === FOOTER (just above statusbar) ======================================
+        # =========================================================================
+        foot = ttk.Frame(self)
+        foot.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
         self.foot = foot
+
         # right cluster
-        ttk.Button(foot, text="Copy Alerts",                         command=self._copy_alerts).pack(side="right", padx=(8,0))
-        ttk.Button(foot, text="Copy Active",                         command=self._copy_active).pack(side="right", padx=(8,0))
-        ttk.Button(foot, text="Copy Aggregates",                     command=self._copy_aggregates).pack(side="right", padx=(8,0))
-        ttk.Button(foot, text="Export Snapshot (CSV)",               command=self._export_snapshot).pack(side="right", padx=(8,0))
-        ttk.Button(foot, text="Manage Hostname Aliases",             command=self._on_manage_hostname_aliases).pack(side="right", padx=(8,0))
-        ttk.Button(foot, text="Set Hostname Alias (from selection)", command=self._on_set_hostname_alias).pack(side="right", padx=(8,12))
+        ttk.Button(
+            foot,
+            text="Copy Alerts",
+            command=self._copy_alerts,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            foot,
+            text="Copy Active",
+            command=self._copy_active,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            foot,
+            text="Copy Aggregates",
+            command=self._copy_aggregates,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            foot,
+            text="Export Snapshot (CSV)",
+            command=self._export_snapshot,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            foot,
+            text="Manage Hostname Aliases",
+            command=self._on_manage_hostname_aliases,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            foot,
+            text="Set Hostname Alias (from selection)",
+            command=self._on_set_hostname_alias,
+        ).pack(side="right", padx=(8, 12))
+
         # left cluster (always visible)
-        ttk.Button(foot, text="Export unknown MAC addresses",        command=self._on_copy_unknown_vendors_menu, ).pack(side="left")
-        ttk.Button(foot, text="Copy Debug Bundle", command=self._copy_debug_bundle).pack(side="left", padx=(8,12))
-    
-        # =========================================================================
-        # === UI.TOP (header: note left, status right) ============================
-        # =========================================================================
-        top = ttk.Frame(self); top.pack(fill="x", padx=8, pady=(6,4))
-        self.top = top
-    
-        self.note = getattr(self, "note", tk.StringVar())
-        if not self.note.get():
-            self.note.set("Monitoring router, draining alerts, and resolving rDNS…")
-        self.note_lbl = ttk.Label(top, textvariable=self.note, anchor="w")
-        self.note_lbl.pack(side="left", fill="x", expand=True)
-    
-        self.status = tk.StringVar(value="Starting…")
-        ttk.Label(top, textvariable=self.status, anchor="e").pack(side="right")
-    
-        if hasattr(self, "_init_layout"):
-            try: self._init_layout()
-            except Exception: pass
-    
+        ttk.Button(
+            foot,
+            text="Export unknown MAC addresses",
+            command=self._on_copy_unknown_vendors_menu,
+        ).pack(side="left")
+        ttk.Button(
+            foot,
+            text="Copy Debug Bundle",
+            command=self._copy_debug_bundle,
+        ).pack(side="left", padx=(8, 12))
+
         # =========================================================================
         # === UI.CONTENT (everything that scrolls/expands) ========================
         # =========================================================================
         content = ttk.Frame(self)
         content.pack(fill="both", expand=True)  # fills the space ABOVE the fixed bottom area
-    
-        # =========================================================================
-        # === UI.MIDDLE-2 (active connections) ====================================
-        # =========================================================================
+
         paned = ttk.PanedWindow(content, orient="vertical")
         paned.pack(fill="both", expand=True, padx=8, pady=4)
-    
-        # ----- Alerts SECTION (TOP of CONTENT) -----------------------------------
+
+        # =========================================================================
+        # === Alerts SECTION (top of content) =====================================
+        # =========================================================================
         alert_outer = ttk.Frame(paned)
         paned.add(alert_outer, weight=1)
-    
+
         self.alerts_title = tk.StringVar(value="Alerts")
-        ttk.Label(alert_outer, textvariable=self.alerts_title, anchor="w",
-                  font=("Segoe UI", 10, "bold")).pack(side="top", anchor="w", pady=(4,0))
-    
-        alertf = ttk.Frame(alert_outer); alertf.pack(fill="both", expand=True)
-    
+        ttk.Label(
+            alert_outer,
+            textvariable=self.alerts_title,
+            anchor="w",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="top", anchor="w", pady=(4, 0))
+
+        # Search / filter row under the title, above the alerts table
+        filter_row = ttk.Frame(alert_outer)
+        filter_row.pack(fill="x", pady=(2, 0))
+
+        ttk.Label(filter_row, text="Filter (all tables):").pack(side="left")
+
+        self.alert_filter_var = tk.StringVar()
+        entry = ttk.Entry(filter_row, textvariable=self.alert_filter_var, width=30)
+        entry.pack(side="left", padx=(4, 8))
+
+        # live filtering as the user types
+        self.alert_filter_var.trace_add("write", lambda *args: self._apply_alert_filter())
+
+        ttk.Button(
+            filter_row,
+            text="Clear",
+            command=lambda: self.alert_filter_var.set(""),
+        ).pack(side="left")
+
+        alertf = ttk.Frame(alert_outer)
+        alertf.pack(fill="both", expand=True)
+
         alerts_labels = {
             "time":   "Time",
             "mac":    "MAC",
@@ -2353,10 +2551,13 @@ class App(tk.Tk):
             "bytes":  "Bytes (TX)",
             "note":   "Note",
         }
-        self.alerts = ttk.Treeview(alertf, columns=tuple(alerts_labels), show="headings", height=8)
+        self.alerts = ttk.Treeview(
+            alertf,
+            columns=tuple(alerts_labels),
+            show="headings",
+            height=8,
+        )
         _force_headings(self.alerts, alerts_labels)
-
-
 
         self.alerts.column("time",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
         self.alerts.column("mac",    width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
@@ -2365,27 +2566,40 @@ class App(tk.Tk):
         self.alerts.column("local",  width=COL_W_LOCAL, minwidth=COL_W_LOCAL, stretch=False, anchor="w")
         self.alerts.column("bytes",  width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
         self.alerts.column("note",   width=180,         minwidth=120,         stretch=True,  anchor="w")
-    
+
+        self._apply_saved_column_widths("alerts", self.alerts)
+
+        self.alerts.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
+        self.alerts.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
+        self.alerts.tag_configure("new_device",     background=NEW_DEVICE_BACKGROUND)
+
         scry1 = ttk.Scrollbar(alertf, orient="vertical", command=self.alerts.yview)
         self.alerts.configure(yscrollcommand=scry1.set)
         self.alerts.pack(side="left", fill="both", expand=True, pady=8)
-        scry1.pack(side="left", fill="y", padx=(0,8), pady=8)
-    
+        scry1.pack(side="left", fill="y", padx=(0, 8), pady=8)
+
         if hasattr(self, "_bind_edit_on_doubleclick"):
             self._bind_edit_on_doubleclick(self.alerts, mac_col="mac", vendor_col="vendor", local_col="local")
-    
+
+        self.alerts.bind("<Button-3>", self._on_right_click_active)
+
         # =========================================================================
-        # === UI.MIDDLE-2 (active connections) ====================================
+        # === Active Connections SECTION (middle) =================================
         # =========================================================================
         active_outer = ttk.Frame(paned)
         paned.add(active_outer, weight=2)
-    
+
         self.active_title = tk.StringVar(value="Active Connections (top 200)")
-        ttk.Label(active_outer, textvariable=self.active_title, anchor="w",
-                  font=("Segoe UI", 10, "bold")).pack(side="top", anchor="w", pady=(4,0))
-    
-        midf = ttk.Frame(active_outer); midf.pack(fill="both", expand=True)
-    
+        ttk.Label(
+            active_outer,
+            textvariable=self.active_title,
+            anchor="w",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="top", anchor="w", pady=(4, 0))
+
+        midf = ttk.Frame(active_outer)
+        midf.pack(fill="both", expand=True)
+
         active_labels = {
             "first":  "First Seen",
             "mac":    "MAC",
@@ -2397,14 +2611,19 @@ class App(tk.Tk):
             "over1mb":">1MB?",
             "state":  "State",  # hidden unless DEBUG
         }
-        self.tree = ttk.Treeview(midf, columns=tuple(active_labels), show="headings", height=14)
+        self.tree = ttk.Treeview(
+            midf,
+            columns=tuple(active_labels),
+            show="headings",
+            height=14,
+        )
         _force_headings(self.tree, active_labels)
 
         self._setup_sorting(
             self.tree,
             table_name="active",
             default_col="last",      # default sort by 'Last seen'
-            default_reverse=False,    # newest last
+            default_reverse=False,   # newest last
         )
 
         # Lock first four to match Alerts
@@ -2417,28 +2636,42 @@ class App(tk.Tk):
         self.tree.column("bytes",   width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
         self.tree.column("over1mb", width=70,          minwidth=70,          stretch=False, anchor="center")
         self.tree.column("state",   width=110,         minwidth=80,          stretch=False, anchor="w")
-         
+
+        self.tree.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
+        self.tree.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
+        self.tree.tag_configure("new_device",     background=NEW_DEVICE_BACKGROUND)
+
+        self.tree.bind("<Button-3>", self._on_right_click_active)
+
+        self._apply_saved_column_widths("active", self.tree)
+
         scry2 = ttk.Scrollbar(midf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scry2.set)
         self.tree.pack(side="left", fill="both", expand=True, pady=8)
-        scry2.pack(side="left", fill="y", padx=(0,8), pady=8)
-        
+        scry2.pack(side="left", fill="y", padx=(0, 8), pady=8)
+
         if hasattr(self, "_bind_edit_on_doubleclick"):
             self._bind_edit_on_doubleclick(self.tree, mac_col="mac", vendor_col="vendor", local_col="local")
         if hasattr(self, "_apply_state_visibility"):
             self._apply_state_visibility()
-    
+
         # =========================================================================
-        # === UI.BOTTOM (aggregates table) ========================================
+        # === Aggregates SECTION (bottom of content) ==============================
         # =========================================================================
-        agg_outer = ttk.Frame(content); agg_outer.pack(fill="both", expand=False, padx=8, pady=(0,4))
-    
+        agg_outer = ttk.Frame(content)
+        agg_outer.pack(fill="both", expand=False, padx=8, pady=(0, 4))
+
         self.agg_title = tk.StringVar(value="Per-Device Totals")
-        ttk.Label(agg_outer, textvariable=self.agg_title, anchor="w",
-                  font=("Segoe UI", 10, "bold")).pack(side="top", anchor="w", pady=(4,0))
-    
-        aggf = ttk.Frame(agg_outer); aggf.pack(fill="both", expand=True)
-    
+        ttk.Label(
+            agg_outer,
+            textvariable=self.agg_title,
+            anchor="w",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="top", anchor="w", pady=(4, 0))
+
+        aggf = ttk.Frame(agg_outer)
+        aggf.pack(fill="both", expand=True)
+
         agg_labels = {
             "sightings": "Sightings",
             "mac":       "MAC",
@@ -2446,33 +2679,40 @@ class App(tk.Tk):
             "dest":      "Destination",
             "bytes":     "Total Bytes",
         }
-    
-        self.agg = ttk.Treeview(aggf, columns=tuple(agg_labels), show="headings", height=8)
+
+        self.agg = ttk.Treeview(aggf, columns=tuple(agg_labels), show="headings", height=8,)
         _force_headings(self.agg, agg_labels)
-    
+
         self._setup_sorting(
             self.agg,
             table_name="agg",
-            default_col="sightings",      # sort by bytes descending by default
+            default_col="sightings",
             default_reverse=True,
         )
-        
+
         self.agg.column("sightings", width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="e")
         self.agg.column("mac",       width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.agg.column("vendor",    width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
         self.agg.column("dest",      width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=False, anchor="w")
         self.agg.column("bytes",     width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
-    
+
+        self.agg.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
+        self.agg.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
+        self.agg.tag_configure("new_device",     background=NEW_DEVICE_BACKGROUND)
+
+        self.agg.bind("<Button-3>", self._on_right_click_active)
+        self._apply_saved_column_widths("agg", self.agg)
+
         scry3 = ttk.Scrollbar(aggf, orient="vertical", command=self.agg.yview)
         self.agg.configure(yscrollcommand=scry3.set)
         self.agg.pack(side="left", fill="both", expand=True, pady=8)
-        scry3.pack(side="left", fill="y", padx=(0,8), pady=8)
-    
+        scry3.pack(side="left", fill="y", padx=(0, 8), pady=8)
+
         if hasattr(self, "_bind_edit_on_doubleclick"):
             self._bind_edit_on_doubleclick(self.agg, mac_col="mac", vendor_col="vendor", local_col=None)
-    
+
         self._post_build_column_fix()
-        
+
         # schedule refresh after widgets exist
         try:
             self.after(250, self._refresh_ui)
@@ -2971,59 +3211,25 @@ class App(tk.Tk):
         return f"{name} ({ip}):{port}" if name else f"{ip}:{port}"
 
     # --- Menu handlers ---
-    # --- [UI] _on_exit --------------------------------------
-    def _on_exit(self):
-        try:
-            self.destroy()
-        except Exception:
-            import sys
-            sys.exit(0)
-
-    # --- [UI] _on_test_ssh --------------------------------------
-    def _on_test_ssh(self):
-        secrets = _load_ssh_secrets(SSH_SECRETS_FILE)
-        host = UDM_SSH_HOST
-        port = secrets.get("port", UDM_SSH_PORT)
-
-        # lightweight probe using the same logic as your collector
-        try:
-            tester = ConntrackCollectorSSH(
-                host=host, port=port,
-                device_creds=secrets.get("device", {}),
-                console_creds=secrets.get("console", {}),
-                interval=1
-            )
-            # try device then console without starting the thread
-            ok_dev = ok_con = False
-            try:
-                tester._try_connect("device")
-                ok_dev = True
-            except Exception as e:
-                dev_err = str(e)
-            finally:
-                try:
-                    if tester._ssh: tester._ssh.close()
-                except Exception:
-                    pass
-
-            try:
-                tester._try_connect("console")
-                ok_con = True
-            except Exception as e:
-                con_err = str(e)
-            finally:
-                try:
-                    if tester._ssh: tester._ssh.close()
-                except Exception:
-                    pass
-
-            msg = []
-            msg.append(f"Host: {host}:{port}")
-            msg.append(f"Device:  {'OK' if ok_dev else f'FAIL ({dev_err})'}")
-            msg.append(f"Console: {'OK' if ok_con else f'FAIL ({con_err})'}")
-            messagebox.showinfo("SSH Test", "\n".join(msg))
-        except Exception as e:
-            messagebox.showerror("SSH Test", f"Unexpected error: {e}")
+    # --- [UI] _on_about --------------------------------------
+    def _on_about(self):
+        import tkinter.messagebox as mbox
+        import platform
+        
+        lines = [
+            f"{APP_NAME}",
+            f"Version: {VERSION}  ({VERSION_DATE})",
+            f"Python:  {platform.python_version()}",
+            f"SNMP backend: {get_snmp_backend_name()}",
+            "",
+            "Files:",
+            f"  ssh_secrets: {SSH_SECRETS_FILE}",
+            f"  config:      {CONFIG_FILE}",
+        ]
+        
+        mbox.showinfo("About","\n".join(lines)
+          #  "SNMP Monitor\nVendor resolution via offline DB + local overrides.\n© You."
+        )
 
     # --- [UI] _on_copy_unknown_vendors --------------------------------------
     def _on_copy_unknown_vendors(self, text: str) -> None:
@@ -3073,25 +3279,222 @@ class App(tk.Tk):
         lines = ["# OUI,count"] + [f"{k},{v}" for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
         self._copy_to_clipboard("\n".join(lines), "Unknown vendor OUIs copied.")
 
-    # --- [UI] _on_about --------------------------------------
-    def _on_about(self):
-        import tkinter.messagebox as mbox
-        import platform
+    # --- [UI|LIFECYCLE] _on_close ----------------------------------
+    def _on_close(self):
         
-        lines = [
-            f"{APP_NAME}",
-            f"Version: {VERSION}  ({VERSION_DATE})",
-            f"Python:  {platform.python_version()}",
-            f"SNMP backend: {get_snmp_backend_name()}",
-            "",
-            "Files:",
-            f"  ssh_secrets: {SSH_SECRETS_FILE}",
-            f"  config:      {CONFIG_FILE}",
-        ]
-        
-        mbox.showinfo("About","\n".join(lines)
-          #  "SNMP Monitor\nVendor resolution via offline DB + local overrides.\n© You."
-        )
+        """Persist window + column layout, then close the app."""
+        try:
+            # 1) Snapshot geometry + state
+            try:
+                self.cfg["window_geometry"] = self.winfo_geometry()
+            except Exception:
+                pass
+
+            try:
+                st = self.state()
+                self.cfg["window_state"] = "zoomed" if st == "zoomed" else "normal"
+            except Exception:
+                self.cfg["window_state"] = "normal"
+
+            # 2) Snapshot column widths for each table
+            col_cfg = self.cfg.setdefault("column_widths", {})
+
+            def _capture(table_name: str, tv: ttk.Treeview | None):
+                if tv is None:
+                    return
+                try:
+                    widths: dict[str, int] = {}
+                    for cid in tv["columns"]:
+                        try:
+                            widths[cid] = int(tv.column(cid, "width"))
+                        except Exception:
+                            continue
+                    col_cfg[table_name] = widths
+                except Exception:
+                    pass
+
+            _capture("active", getattr(self, "tree", None))
+            _capture("agg", getattr(self, "agg", None))
+            _capture("alerts", getattr(self, "alerts", None))
+
+            # 3) Save config to disk
+            self.save_config(self.cfg)
+
+        except Exception:
+            # Never crash on close
+            pass
+
+        try:
+            self.destroy()
+        except Exception:
+            import sys
+            sys.exit(0)
+
+    # --- [UI] _on_exit --------------------------------------
+    def _on_exit(self):
+        """Menu handler: delegate to _on_close()."""
+        self._on_close()
+
+    # --- [UI] Right-click context menu on tables -------------------------------
+    def _on_right_click_active(self, event):
+        """
+        Context menu for the Active, Aggregates and Alerts tables.
+
+        - For Active / Aggregates: allows editing hostname alias (IP) and MAC label.
+        - For all tables: allows copying the row to clipboard.
+        """
+        widget = event.widget
+
+        # Only handle treeviews
+        if not isinstance(widget, ttk.Treeview):
+            return
+
+        # Identify row under mouse
+        row_id = widget.identify_row(event.y)
+        if not row_id:
+            return
+
+        # Select the row under the cursor so keyboard shortcuts etc. match
+        try:
+            widget.selection_set(row_id)
+        except Exception:
+            pass
+
+        cols = list(widget["columns"])
+        values = widget.item(row_id, "values") or ()
+        row = {
+            col: (values[idx] if idx < len(values) else "")
+            for idx, col in enumerate(cols)
+        }
+
+        # Try to pull out something that looks like a local IP and MAC
+        local_val = row.get("local") or row.get("local_ip") or ""
+        mac_val = row.get("mac") or row.get("client_mac") or ""
+
+        # Strip port / hostname decorations from local (e.g. "192.168.1.10:1234")
+        ip_candidate = ""
+        if isinstance(local_val, str) and local_val:
+            # "ip[:port]" or "ip [host]:port"
+            base = local_val.split()[0]          # drop hostname in brackets if present
+            ip_candidate = base.split(":", 1)[0] # drop port
+
+        menu = tk.Menu(self, tearoff=0)
+
+        # Edit hostname alias for local IP (where it makes sense)
+        if ip_candidate:
+            menu.add_command(
+                label=f"Edit hostname alias for {ip_candidate}",
+                command=lambda ip=ip_candidate: self._edit_alias_for_ip(ip),
+            )
+
+        # Edit MAC label / device name
+        if mac_val:
+            menu.add_command(
+                label=f"Edit device label for {mac_val}",
+                command=lambda m=mac_val, ip=ip_candidate: self._edit_label_for_mac_from_row(m, ip),
+            )
+
+        # Copy entire row text
+        if values:
+            if menu.index("end") is not None:
+                menu.add_separator()
+            menu.add_command(
+                label="Copy row",
+                command=lambda txt="\t".join(str(v) for v in values): self._copy_to_clipboard(
+                    txt,
+                    "Row copied to clipboard",
+                ),
+            )
+
+        if menu.index("end") is None:
+            # Nothing useful to show
+            return
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    # --- [UI] _edit_label_for_mac_from_row -------------------------------
+    def _edit_label_for_mac_from_row(self, mac: str, ip: str | None = None) -> None:
+        """
+        Helper for the context menu: open the MAC-label dialog and persist changes.
+        """
+        mac = (mac or "").strip()
+        if not mac:
+            return
+
+        # Normalize once
+        mac_norm = _normalize_mac(mac) or mac.upper()
+        ip = (ip or "").strip()
+
+        # Reuse the existing edit dialog
+        result = self._open_edit_dialog(mac_norm, ip)
+        if not result:
+            return
+
+        new_mac, label = result
+        new_mac = _normalize_mac(new_mac) or mac_norm
+
+        # Persist via existing helper
+        self._set_label_for_mac(new_mac, label)
+
+        # Small delayed refresh so the vendor/label column updates
+        self.after(10, self._refresh_ui)
+
+    # --- [UI] _on_toggle_show_idle --------------------------------------
+    def _on_toggle_show_idle(self) -> None:
+        """Persist the 'Show idle devices' toggle to config.json."""
+        self.cfg["show_idle_devices"] = bool(self.show_idle_var.get())
+        self.save_config(self.cfg)
+        # Force a quick repaint so the table reflects the new filter
+        self.after(10, self._refresh_ui)
+
+    # --- [UI] _on_test_ssh --------------------------------------
+    def _on_test_ssh(self):
+        secrets = _load_ssh_secrets(SSH_SECRETS_FILE)
+        host = UDM_SSH_HOST
+        port = secrets.get("port", UDM_SSH_PORT)
+
+        # lightweight probe using the same logic as your collector
+        try:
+            tester = ConntrackCollectorSSH(
+                host=host, port=port,
+                device_creds=secrets.get("device", {}),
+                console_creds=secrets.get("console", {}),
+                interval=1
+            )
+            # try device then console without starting the thread
+            ok_dev = ok_con = False
+            try:
+                tester._try_connect("device")
+                ok_dev = True
+            except Exception as e:
+                dev_err = str(e)
+            finally:
+                try:
+                    if tester._ssh: tester._ssh.close()
+                except Exception:
+                    pass
+
+            try:
+                tester._try_connect("console")
+                ok_con = True
+            except Exception as e:
+                con_err = str(e)
+            finally:
+                try:
+                    if tester._ssh: tester._ssh.close()
+                except Exception:
+                    pass
+
+            msg = []
+            msg.append(f"Host: {host}:{port}")
+            msg.append(f"Device:  {'OK' if ok_dev else f'FAIL ({dev_err})'}")
+            msg.append(f"Console: {'OK' if ok_con else f'FAIL ({con_err})'}")
+            messagebox.showinfo("SSH Test", "\n".join(msg))
+        except Exception as e:
+            messagebox.showerror("SSH Test", f"Unexpected error: {e}")
 
     # --- [UI] _toggle_rdns --------------------------------------
     def _toggle_rdns(self):
@@ -3109,21 +3512,13 @@ class App(tk.Tk):
         # Tell the user
         self._set_status(f"rDNS {'ON' if RESOLVE_RDNS else 'OFF'}")
 
-    # --- [UI] _on_toggle_show_idle --------------------------------------
-    def _on_toggle_show_idle(self) -> None:
-        """Persist the 'Show idle devices' toggle to config.json."""
-        self.cfg["show_idle_devices"] = bool(self.show_idle_var.get())
-        self.save_config(self.cfg)
-        # Force a quick repaint so the table reflects the new filter
-        self.after(10, self._refresh_ui)
-
     # --- [UI|REFRESH] _refresh_ui ----------------------------------------------
     # Purpose: Drain alerts; render tables; update status; queue rDNS
     def _refresh_ui(self):
         import queue
 
         # --- [UI|NET] _fmt_dest ----------------------------------------------
-        # formatter for IP[:port] with cached rDNS if present
+        # --- formatter for IP[:port] with cached rDNS if present
         def _fmt_dest(remote_ip: str, remote_port):
             try:
                 with _dns_lock:
@@ -3131,7 +3526,27 @@ class App(tk.Tk):
             except Exception:
                 host = None
             return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
-    
+
+        # --- [UI|HELPER] _tags_for_row(vendor_text ----------------------------------------------
+        # --- helper: decide which tags to apply based on vendor / bytes / "newness"
+        def _tags_for_row(vendor_text: str, bytes_val: int | float, *, is_new: bool = False) -> tuple[str, ...]:
+            tags: list[str] = []
+
+            v = (vendor_text or "").strip().lower()
+            if not v or v == "unknown":
+                tags.append("unknown_vendor")
+
+            try:
+                if int(bytes_val) >= 1_048_576:  # 1 MB threshold
+                    tags.append("high_volume")
+            except Exception:
+                pass
+
+            if is_new:
+                tags.append("new_device")
+
+            return tuple(tags)
+        
         with self.core.data_lock:
     
             # ==============================================================
@@ -3154,15 +3569,26 @@ class App(tk.Tk):
                     else:
                         dest_text = remote_txt
     
-                    self.alerts.insert("", "end", values=(
-                        alert.get("time", ""),            # Time
-                        alert.get("mac", ""),             # MAC
-                        vendor_disp or "",                # Vendor/Host
-                        dest_text,                        # Destination
-                        local_hostport,                   # Local
-                        int(alert.get("bytes", 0)),       # Bytes (TX)
-                        alert.get("note", ""),            # Note
-                    ))
+                    bytes_val = int(alert.get("bytes", 0) or 0)
+                    vendor_text = vendor_disp or ""
+
+                    # Heuristic: "new device" if the note starts with that phrase
+                    is_new = str(alert.get("note", "")).lower().startswith("new device")
+
+                    tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
+
+                    self.alerts.insert("", "end",
+                        values=(
+                            alert.get("time", ""),   # Time
+                            alert.get("mac", ""),    # MAC
+                            vendor_text,             # Vendor/Host
+                            dest_text,               # Destination
+                            local_hostport,          # Local
+                            bytes_val,               # Bytes (TX)
+                            alert.get("note", ""),   # Note
+                        ),
+                        tags=tags,
+                    )
     
                     # Trim to last 500 alerts
                     if len(self.alerts.get_children()) > 500:
@@ -3184,6 +3610,16 @@ class App(tk.Tk):
                             pass
             except queue.Empty:
                 pass
+    
+            # After alerts table rebuilt:
+            try:
+                if hasattr(self, "alert_filter_var") and self.alert_filter_var.get():
+                    _apply = getattr(self, "_apply_alert_filter", None)
+                    if callable(_apply):
+                        _apply()
+            except Exception:
+                pass
+
     
             # ==============================================================
             # === REFRESH.ACTIVE (middle) - CONNECTIONS ====================
@@ -3222,20 +3658,28 @@ class App(tk.Tk):
                 local_hp = f'{rec["local_ip"]}:{rec["local_port"]}'
                 vendor_disp = self._display_name(rec.get("local_ip"), rec.get("local_mac"))
     
+                bytes_val = int(rec.get("bytes_tx") or 0)
+                vendor_text = vendor_disp or ""
+
+                # "New" flow heuristic: first_seen == last_seen (i.e. just created this session)
+                is_new = rec.get("first_seen") == rec.get("last_seen")
+
+                tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
+
                 row_vals = [
                     rec.get("first_seen", ""),               # First Seen
                     rec.get("local_mac", ""),                # MAC
-                    vendor_disp or "",                       # Vendor/Host
+                    vendor_text,                             # Vendor/Host
                     dest_text,                               # Destination
                     local_hp,                                # Local
                     rec.get("last_seen", ""),                # Last Seen
-                    int(rec.get("bytes_tx") or 0),           # Bytes (TX)
+                    bytes_val,                               # Bytes (TX)
                     "Yes" if rec.get("over_1mb") else "No",  # >1MB?
                 ]
                 if DEBUG:
                     row_vals.append(str(rec.get("state", "")).lower())
-    
-                self.tree.insert("", "end", values=tuple(row_vals))
+
+                self.tree.insert("", "end", values=tuple(row_vals), tags=tags)
     
             # ==============================================================
             # === REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS ==========
@@ -3283,13 +3727,25 @@ class App(tk.Tk):
                         host = None
                     agg_dest = f"{rip} [{host}]:{rport}" if host else f"{rip}:{rport}"
     
-                    self.agg.insert("", "end", values=(
-                        int(stats.get("sightings") or 0),   # Sightings
-                        mac,                                # MAC
-                        vendor,                             # Vendor/Host
-                        agg_dest,                           # Destination
-                        int(stats.get("bytes") or 0),       # Total Bytes
-                    ))
+                    sightings = int(stats.get("sightings") or 0)
+                    bytes_val = int(stats.get("bytes") or 0)
+                    vendor_text = vendor or ""
+
+                    # Heuristic: a "new" device if we’ve only seen it a couple of times
+                    is_new = sightings <= 2
+
+                    tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
+
+                    self.agg.insert("", "end",
+                        values=(
+                            sightings,     # Sightings
+                            mac,           # MAC
+                            vendor_text,   # Vendor/Host
+                            agg_dest,      # Destination
+                            bytes_val,     # Total Bytes
+                        ),
+                        tags=tags,
+                    )
               
                     # Re-apply any remembered sort on all tables
         try:
@@ -3317,18 +3773,83 @@ class App(tk.Tk):
     
             snmp_label = get_snmp_backend_name()
             counts = getattr(self.core, "last_counts", {"arp": 0, "tcp": 0, "flows": 0})
-            status_text = (
-                f"Polling every {POLL_INTERVAL_SECONDS}s | Flow source: {nf_status} | "
-                f"SNMP: {snmp_label} | ARP:{counts.get('arp',0)} "
-                f"TCP:{counts.get('tcp',0)} Flows:{counts.get('flows',0)}"
-            )
+
+        # --- Status bar metrics -----------------------------------
+        try:
+            # 1) Active connections + unique MACs
+            active_rows = getattr(self.core, "get_active_rows_prepared", None)
+            if callable(active_rows):
+                rows = active_rows(limit=COPY_LIMIT_ROWS)
+            else:
+                rows = list(getattr(self.core, "conn_map", {}).values())
+
+            active_count = len(rows)
+            macs = {normalize_mac(r.get("local_mac") or r.get("mac") or "") for r in rows}
+            macs.discard("")  # remove empties
+            unique_macs = len(macs)
+
+            if hasattr(self, "status_conn"):
+                self.status_conn.set(f"Active: {active_count} | MACs: {unique_macs}")
+
+            # 2) Flow collector state
+            flow_label = "Flow: off"
+            core = getattr(self, "core", None)
+            if core is not None:
+                try:
+                    last_counts = getattr(core, "last_counts", {}) or {}
+                    flows = int(last_counts.get("flows", 0))
+                    if getattr(core, "nf", None) is not None and ENABLE_NETFLOW_V5_COLLECTOR:
+                        flow_label = f"Flow: on ({flows} flows)"
+                except Exception:
+                    pass
+
+            if hasattr(self, "status_flow"):
+                self.status_flow.set(flow_label)
+
+            # 3) SSH collector state
+            ssh_label = "SSH: off"
             try:
-                self.status.set(status_text)
+                if ENABLE_CONNTRACK_SSH:
+                    # if you have a conntrack object with a status, use it here
+                    ssh_label = "SSH: on"
             except Exception:
                 pass
-    
-        # schedule next refresh
-        self.after(1000, self._refresh_ui)
+
+            if hasattr(self, "status_ssh"):
+                self.status_ssh.set(ssh_label)
+
+            # 4) Clock / timestamp warning (simple initial version)
+            clock_label = "Clock: ok"
+            try:
+                # rough heuristic: last alert/last_seen older than N seconds?
+                # you can refine this later with real router vs local time diff.
+                now = time.time()
+                # If you have rows with 'last_seen' as epoch seconds:
+                lag = None
+                for r in rows:
+                    ts = r.get("last_seen") or r.get("first_seen")
+                    if isinstance(ts, (int, float)):
+                        dt = now - ts
+                        if dt >= 0:
+                            lag = dt if lag is None else min(lag, dt)
+                if lag is not None and lag > 120:
+                    clock_label = f"Clock: {int(lag)}s behind?"
+            except Exception:
+                pass
+
+            if hasattr(self, "status_clock"):
+                self.status_clock.set(clock_label)
+
+        except Exception:
+            # don't let status bar updates kill the UI
+            pass
+
+        # finally, reschedule next refresh
+        if getattr(self, "_ui_ready", False):
+            try:
+                self.after(1000, self._refresh_ui)
+            except Exception:
+                pass
 
     # --- [UI|CONFIG] _toggle_conntrack_ssh ------------------------------------
     def _toggle_conntrack_ssh(self) -> None:
@@ -3863,6 +4384,57 @@ class App(tk.Tk):
             pass
         self.destroy()
 
+    # --- [UI|Tkinter] _show_device_details ------------------------------------
+    def _show_device_details(self, row):
+        """
+        Display a details window for a selected device or connection.
+        """
+        win = tk.Toplevel(self)
+        win.title(f"Device Details – {row.get('local_ip','')}")
+        win.geometry("420x400")
+        win.resizable(False, False)
+
+        # Title
+        tk.Label(win, text=row.get("display_name", row["local_ip"]),
+                font=("Segoe UI", 14, "bold")).pack(pady=10)
+
+        # Key fields in a grid
+        fields = [
+            ("IP Address", row.get("local_ip")),
+            ("MAC Address", row.get("local_mac")),
+            ("Vendor", row.get("vendor")),
+            ("Hostname", row.get("hostname")),
+            ("Bytes TX", row.get("bytes_tx")),
+            ("Destination", row.get("remote")),
+            ("First Seen", row.get("first_seen")),
+            ("Last Seen", row.get("last_seen")),
+        ]
+
+        frame = ttk.Frame(win)
+        frame.pack(fill="x", padx=15)
+
+        for label, val in fields:
+            ttk.Label(frame, text=f"{label}:").pack(anchor="w")
+            ttk.Label(frame, text=str(val)).pack(anchor="w")
+
+        # Editable friendly name
+        name_var = tk.StringVar(value=self._get_current_label_for_mac(row["local_mac"]))
+        ttk.Label(win, text="Friendly Name:").pack(anchor="w", padx=15, pady=(10,0))
+        entry = ttk.Entry(win, textvariable=name_var, width=40)
+        entry.pack(padx=15)
+
+        def save_name():
+            self._set_label_for_mac(row["local_mac"], name_var.get())
+            self._refresh_ui()
+
+        ttk.Button(win, text="Save Name", command=save_name).pack(pady=10)
+
+        # Actions
+        actions = ttk.Frame(win)
+        actions.pack(pady=10)
+        ttk.Button(actions, text="Ping", command=lambda: os.system(f"ping {row['local_ip']} -n 4")).grid(row=0, column=0, padx=5)
+        ttk.Button(actions, text="WHOIS", command=lambda: webbrowser.open(f"https://whois.domaintools.com/{row['remote']}")).grid(row=0, column=1, padx=5)
+
 # endregion UI LAYER
 
 # -------------------- Offline MAC → Vendor resolver (enhanced) --------------------
@@ -4115,7 +4687,7 @@ def vendor_for_mac(mac: str | None) -> str:
 # =============================================================================
 
 # region ENTRY POINT
-# --- [] __main__ --------------------------------------
+# --- [MAIN] __main__ --------------------------------------
 if __name__ == "__main__":
     try:
         import tkinter  # ensure available early
