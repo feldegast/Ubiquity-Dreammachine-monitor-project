@@ -2012,15 +2012,15 @@ class App(tk.Tk):
         self.detail_note   = getattr(self, "detail_note",   tk.StringVar(value=""))
 
         rows = [
-            ("Source",       self.detail_table),
-            ("IP address",   self.detail_ip),
-            ("MAC address",  self.detail_mac),
-            ("Vendor",       self.detail_vendor),
-            ("Name / alias", self.detail_name),
-            ("Destination",  self.detail_dest),
-            ("Bytes",        self.detail_bytes),
-            ("When",         self.detail_when),
-            ("Note",         self.detail_note),
+            ("Source",        self.detail_table),
+            ("IP address",    self.detail_ip),
+            ("MAC address",   self.detail_mac),
+            ("Vendor / Host", self.detail_vendor),
+            ("Name / alias",  self.detail_name),
+            ("Destination",   self.detail_dest),
+            ("Bytes",         self.detail_bytes),
+            ("When",          self.detail_when),
+            ("Note",          self.detail_note),
         ]
 
         for r, (label, var) in enumerate(rows):
@@ -2062,7 +2062,47 @@ class App(tk.Tk):
         s = s.replace(".", ".\u200b")
         s = s.replace("/", "/\u200b")
         return s
-        
+
+    # --- [UI|DETAILS] _describe_port -------------------------------------------
+    def _describe_port(self, port_str: str) -> str:
+        """
+        Map a numeric port to a human-friendly name for common services.
+        Returns an empty string if unknown or not numeric.
+        """
+        try:
+            p = int(str(port_str))
+        except Exception:
+            return ""
+
+        common = {
+            20:  "FTP-data",
+            21:  "FTP",
+            22:  "SSH",
+            23:  "Telnet",
+            25:  "SMTP",
+            53:  "DNS",
+            80:  "HTTP",
+            110: "POP3",
+            123: "NTP",
+            143: "IMAP",
+            161: "SNMP",
+            389: "LDAP",
+            443: "HTTPS",
+            445: "SMB",
+            587: "SMTP-submission",
+            993: "IMAPS",
+            995: "POP3S",
+            1433: "MSSQL",
+            3306: "MySQL",
+            3389: "RDP",
+            5432: "PostgreSQL",
+            6379: "Redis",
+            8080: "HTTP-alt",
+            8443: "HTTPS-alt",
+        }
+
+        return common.get(p, "")
+
     # --- [UI|DETAILS] _update_details_from_tree --------------------------------
     def _update_details_from_tree(self, tree, table_name: str) -> None:
         """
@@ -2086,12 +2126,13 @@ class App(tk.Tk):
         except Exception:
             return
 
-        # Derive common fields
+        # Derive common fields from the row
         src = table_name
         local = row.get("local", "")
-        dest = row.get("dest", row.get("destination", ""))
-        mac = row.get("mac", row.get("client_mac", ""))
+        dest  = row.get("dest", row.get("destination", ""))
+        mac   = row.get("mac", row.get("client_mac", ""))
         vendor = row.get("vendor", "")
+
         bytes_val = (
             row.get("bytes")
             or row.get("Total Bytes")
@@ -2102,9 +2143,25 @@ class App(tk.Tk):
 
         # IP from local field "ip[:port]" or "ip [host]:port"
         ip = ""
+        local_port = ""
         if isinstance(local, str) and local:
+            # Take first token, split ip:port if present
             base = local.split()[0]
-            ip = base.split(":", 1)[0]
+            parts = base.split(":", 1)
+            ip = parts[0]
+            if len(parts) == 2:
+                local_port = parts[1]
+
+        # Extract remote_ip and remote_port from dest string.
+        # dest comes from _fmt_dest("ip", port) for active/agg, or alert remote.
+        remote_ip = ""
+        remote_port = ""
+        if isinstance(dest, str) and dest:
+            hostpart, sep, portpart = dest.rpartition(":")
+            if sep:  # rpartition found a colon
+                remote_port = portpart.strip()
+                # hostpart may be "ip [hostname]" or just "ip"
+                remote_ip = hostpart.split()[0]
 
         when = ""
         if "time" in row:
@@ -2114,20 +2171,48 @@ class App(tk.Tk):
         elif "first" in row:
             when = row.get("first", "")
 
-        # Keep When as a single string now that it's no longer the problem
+        # Keep When as a single string
         when_display = str(when)
 
-        # Friendly name / alias via DeviceNamer, if available
-        name = ""
-        try:
-            namer = getattr(self.core, "namer", None)
-            if namer is not None:
-                name = namer.name_for(mac or None, ip or None) or ""
-        except Exception:
-            name = ""
+        # Friendly name / alias:
+        #  1) Custom MAC label (Edit Device Label)
+        #  2) Hostname alias for this IP (if any)
+        
+        # Name / Alias mirrors whatever the table displays in the Vendor/Host column
+        name = str(vendor)
+
+        # Connection state and over-1MB flag
+        state = ""
+        over1mb = ""
+
+        if table_name == "active":
+            # "Yes"/"No" from the >1MB? column
+            over1mb = row.get("over1mb", "")
+
+            # State column only exists in DEBUG mode; otherwise, try core.conn_map
+            state = row.get("state", "")
+            if not state:
+                try:
+                    # reconstruct key used in conn_map: (local_ip, local_port, remote_ip, remote_port)
+                    lp = int(local_port) if local_port else 0
+                    rp = int(remote_port) if remote_port else 0
+                    key = (ip, lp, remote_ip, rp)
+                    core = getattr(self, "core", None)
+                    if core is not None:
+                        rec = core.conn_map.get(key)
+                        if rec:
+                            state = str(rec.get("state", ""))
+                except Exception:
+                    pass
 
         # Make destination wrap-friendly (dots and slashes)
         dest_display = self._wrap_friendly_uri(dest)
+
+        # Build human-friendly remote port string (e.g. "443 (HTTPS)")
+        remote_port_display = ""
+        if remote_port:
+            desc = self._describe_port(remote_port)
+            remote_port_display = f"{remote_port} ({desc})" if desc else str(remote_port)
 
         # Push into the StringVars
         try:
@@ -2140,6 +2225,13 @@ class App(tk.Tk):
             self.detail_bytes.set(str(bytes_val))
             self.detail_when.set(when_display)
             self.detail_note.set(str(note))
+
+            # New fields
+            self.detail_lport.set(str(local_port or ""))
+            self.detail_rport.set(remote_port_display)
+            self.detail_state.set(str(state or ""))
+            self.detail_over1mb.set(str(over1mb or ""))
+
         except Exception:
             # If details panel not yet built, ignore
             pass
