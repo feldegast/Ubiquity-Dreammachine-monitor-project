@@ -160,3 +160,5 @@ alerts_log.csv
 data/host_aliases.json
 traffic_log.csv
 data/mac_labels.json
+__pycache__/collectors.cpython-312.pyc
+vendors_offline.py
