@@ -76,7 +76,7 @@ except Exception:
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "5.10"
+VERSION = "5.11.0"
 VERSION_DATE = "2025.11.20"
 
 #uaser data defaults
@@ -2741,17 +2741,10 @@ class App(tk.Tk):
         alert_outer = ttk.Frame(paned)
         paned.add(alert_outer, weight=1)
 
-        self.alerts_title = tk.StringVar(value="Alerts")
-        ttk.Label(
-            alert_outer,
-            textvariable=self.alerts_title,
-            anchor="w",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(side="top", anchor="w", pady=(4, 0))
-
-        # Search / filter row under the title, above the alerts table
+        # Global filter row sits at the very top so it visually applies to everything,
+        # not just the Alerts table.
         filter_row = ttk.Frame(alert_outer)
-        filter_row.pack(fill="x", pady=(2, 0))
+        filter_row.pack(fill="x", pady=(4, 0))
 
         ttk.Label(filter_row, text="Filter (all tables):").pack(side="left")
 
@@ -2769,6 +2762,15 @@ class App(tk.Tk):
             text="Clear",
             command=lambda: self.alert_filter_var.set(""),
         ).pack(side="left")
+
+        # Alerts title now comes *below* the filter row
+        self.alerts_title = tk.StringVar(value="Alerts")
+        ttk.Label(
+            alert_outer,
+            textvariable=self.alerts_title,
+            anchor="w",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="top", anchor="w", pady=(2, 0))
 
         alertf = ttk.Frame(alert_outer)
         alertf.pack(fill="both", expand=True)
