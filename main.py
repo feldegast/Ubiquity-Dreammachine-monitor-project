@@ -1692,9 +1692,29 @@ from tkinter import ttk
 import tkinter.messagebox as messagebox
 
 class App(tk.Tk):
+    
+    """
+    Main Tkinter GUI for the Ubiquiti SNMP + NetFlow monitor.
+
+    This window owns:
+    - The three primary tables (Alerts, Active, Aggregates)
+    - The right-hand device details panel
+    - Status bar and footer controls
+    - All menu and context menu handlers
+    - Persistence of layout and config (window size, column widths, details width)
+    """
 
     # --- [UI|INIT] __init__ ------------------------------------
     def __init__(self):
+        """
+        Initialise the main application window.
+
+        - Applies automatic DPI scaling.
+        - Loads persisted configuration from config.json.
+        - Sets window title / geometry based on config.
+        - Creates the Core engine and background collectors.
+        - Builds all UI widgets and starts the periodic refresh loop.
+        """
         super().__init__()
         
         # Apply DPI scaling before we build any UI or set fonts
@@ -1894,13 +1914,17 @@ class App(tk.Tk):
         
         # (If you later have sash / details-panel placement, it can also live here)
 
-
     # --- [UI|SEARCH] _apply_alert_filter ------------------------------------
     def _apply_alert_filter(self, *_):
         """
-        Filter all three tables (Alerts, Active, Aggregates) using the text
-        in self.alert_filter_var. Matches on any visible column text.
+        Apply the live text filter to all three tables.
+
+        The search string is taken from self.alert_filter_var and matched
+        case-insensitively against key fields (IP, hostname, vendor/host,
+        MAC, destination) so that Alerts, Active, and Aggregates all show
+        only rows that contain the filter text.
         """
+
         sv = getattr(self, "alert_filter_var", None)
         pattern = (sv.get() if sv is not None else "") or ""
         pattern = pattern.strip().lower()
@@ -1965,7 +1989,17 @@ class App(tk.Tk):
 
     # --- [UI|LAYOUT] _apply_saved_column_widths ---------------------
     def _apply_saved_column_widths(self, table_name: str, tv: ttk.Treeview) -> None:
-        """Apply per-column widths loaded from config to a Treeview."""
+        """
+        Restore per-column widths for a Treeview from the persisted config.
+
+        Parameters
+        ----------
+        table_name : str
+            Logical name of the table ("active", "agg", "alerts").
+        tv : ttk.Treeview
+            The Treeview whose columns should be sized.
+        """
+
         try:
             cfg = self.cfg or {}
             col_cfg = cfg.get("column_widths", {})
@@ -1984,9 +2018,19 @@ class App(tk.Tk):
     # --- [UI|DETAILS] _build_details_panel ------------------------------------
     def _build_details_panel(self, parent) -> None:
         """
-        Build the right-hand details panel that shows information about
-        the currently selected alert/connection/aggregate row.
+        Build the right-hand device details panel.
+
+        Creates labels and read-only fields for:
+        - Table/source name
+        - Local IP and MAC
+        - Vendor/Host and Name/Alias
+        - Destination URI (wrapped nicely)
+        - Byte count, timestamps, and notes
+        - Local/remote ports, connection state, and >1MB flag
+
+        The panel is fed by _update_details_from_tree() when a row is selected.
         """
+        
         import tkinter as tk
         from tkinter import ttk
 
@@ -2238,6 +2282,17 @@ class App(tk.Tk):
 
     # --- [UI] notify ------------------------------------
     def notify(self, title, msg):
+        """
+        Show a lightweight OS-level toast notification, if supported.
+
+        Parameters
+        ----------
+        title : str
+            Short title for the notification.
+        msg : str
+            Body text to display in the toast.
+        """
+
         if _TOASTER:
             try:
                 _TOASTER.show_toast(title, msg, threaded=True)
@@ -2246,7 +2301,13 @@ class App(tk.Tk):
 
     # --- [UI|LAYOUT] _post_build_column_fix ------------------------------------    
     def _post_build_column_fix(self):
-        """Normalize column #1 widths across the three tables after they exist."""
+        """
+        Normalize the first column width across Alerts, Active, and Aggregates.
+
+        Called after all three Treeviews exist so their "first" column line up
+        visually, using the same width constant as in _build_ui().
+        """
+        
         try:
             # Keep in sync with your build_ui constants
             COL_W_FIRST = 140
@@ -2273,6 +2334,14 @@ class App(tk.Tk):
     # --- [HOSTNAME|UI] _on_manage_hostname_aliases -------------------------
     # Purpose: Manage hostname aliases (add/edit/delete/clear-cache)
     def _on_manage_hostname_aliases(self):
+        """
+        Export a CSV snapshot of the current monitor state to disk.
+
+        Writes a file containing at least the Active and/or Aggregates views,
+        using the same formatted values as shown in the UI, so you can inspect
+        historical data in Excel or other tools.
+        """
+        
         import tkinter as tk
         import tkinter.ttk as ttk
         import tkinter.simpledialog as sd
@@ -2611,6 +2680,13 @@ class App(tk.Tk):
 
     # --- [UI|MENU] _build_menu ------------------------------------
     def _build_menu(self):
+        """
+        Build the menubar for the main window.
+
+        Attaches File / Tools / Help (or equivalent) menus and binds them
+        to the appropriate handler methods on this App instance.
+        """
+
         import tkinter as tk
         menubar = tk.Menu(self)
 
@@ -2668,9 +2744,22 @@ class App(tk.Tk):
         tv["show"] = "headings"
 
     # --- [UI|BUILD] _build_ui --------------------------------------------------
-    # Purpose: MENUBAR + CONTENT (Alerts + Active + Aggregates + Details)
-    #          + STATUS (bottom) + FOOTER (above status)
     def _build_ui(self):
+        """
+        Construct all top-level UI widgets for the main window.
+
+        Layout:
+        - Footer with copy/export buttons.
+        - Status bar with note + live metrics (active, MACs, flow/SSH, clock).
+        - Left side: vertical stack of Alerts, Active, and Aggregates tables.
+        - Right side: device details panel in a fixed-width sidebar.
+        - Binds selection, context menu, and search/filter behaviours.
+        - Schedules the first call to _refresh_ui() when done.
+        """
+        
+        # Purpose: MENUBAR + CONTENT (Alerts + Active + Aggregates + Details)
+        #          + STATUS (bottom) + FOOTER (above status)
+        
         import tkinter as tk
         from tkinter import ttk
 
@@ -3311,6 +3400,13 @@ class App(tk.Tk):
 
     # --- [UI] _get_current_label_for_mac ------------------------------------
     def _get_current_label_for_mac(self, mac: str) -> str:
+        """
+        Look up the current friendly label for a given MAC address.
+
+        Uses the in-memory mac_labels mapping loaded from mac_labels.json and
+        returns an empty string if no label has been assigned yet.
+        """
+        
         if not mac:
             return ""
         try:
@@ -3320,11 +3416,12 @@ class App(tk.Tk):
         d = getattr(self, "_mac_labels", None) or {}
         return d.get(mac.upper(), "")
 
-    # --- [UI] _on_sash_drag ------------------------------------
+    # --- [UI|DRAG DIVIDOR EVENT] _on_sash_drag ----------------------------------------------
     def _on_sash_drag(self, event=None):
         """
-        Live-update the stored panel width while dragging the sash,
-        so config.json gets correct values before exit.
+        Live-update the stored details panel width while dragging the sash.
+        This only updates self.cfg in memory; config.json is still written
+        on close via _on_close → save_config.
         """
         try:
             paned = getattr(self, "main_paned", None)
@@ -3332,18 +3429,17 @@ class App(tk.Tk):
                 return
 
             total = paned.winfo_width()
-            left = paned.sashpos(0)   # width of table area
-            width = max(0, total - left)
+            left = paned.sashpos(0)          # width of the left (tables) pane
+            details_width = max(0, total - left)
 
-            # store live value
-            self.cfg["details_width"] = int(width)
+            self.cfg["details_width"] = int(details_width)
 
-            # optional: debug to console
-            # print("[LIVE WIDTH]", width)
+            # Optional: live debug while tuning
+            # print("[LIVE details_width]", self.cfg["details_width"])
 
         except Exception:
             pass
-
+        
     # --- [UI] _open_edit_dialog ------------------------------------
     def _open_edit_dialog(self, mac_initial: str, ip_initial: str) -> tuple[str, str] | None:
         """Modal dialog to edit a custom device label for a MAC address.
@@ -3441,30 +3537,6 @@ class App(tk.Tk):
         except Exception:
             return ""
 
-    # --- [UI|DRAG DIVIDOR EVENT] _on_sash_drag ----------------------------------------------
-    def _on_sash_drag(self, event=None):
-        """
-        Live-update the stored details panel width while dragging the sash.
-        This only updates self.cfg in memory; config.json is still written
-        on close via _on_close → save_config.
-        """
-        try:
-            paned = getattr(self, "main_paned", None)
-            if paned is None:
-                return
-
-            total = paned.winfo_width()
-            left = paned.sashpos(0)          # width of the left (tables) pane
-            details_width = max(0, total - left)
-
-            self.cfg["details_width"] = int(details_width)
-
-            # Optional: live debug while tuning
-            # print("[LIVE details_width]", self.cfg["details_width"])
-
-        except Exception:
-            pass
-
     # --- [UI] _set_label_for_mac ------------------------------------
     def _set_label_for_mac(self, mac: str, label: str) -> None:
         """Set or clear a custom label for a MAC and persist to disk."""
@@ -3531,9 +3603,21 @@ class App(tk.Tk):
     # --- [UI|TREEVIEW] _setup_sorting ------------------------------------
     def _setup_sorting(self, tree: "ttk.Treeview", table_name: str, default_col: str | None = None, default_reverse: bool = False):
         """
-        Make a treeview sortable by header click and remember the last choice.
-        self._sort_prefs is a dict: {table_name: (col, reverse)}
+        Enable click-to-sort behaviour for a Treeview.
+
+        Parameters
+        ----------
+        tv : ttk.Treeview
+            The Treeview to configure.
+        table_name : str
+            Logical name of the table ("active", "agg", "alerts"), used as a key
+            to remember per-table sort state.
+        default_col : str
+            Column id to sort by when the table is first built.
+        default_reverse : bool
+            Whether the initial sort order should be descending.
         """
+
         if not hasattr(self, "_sort_prefs"):
             self._sort_prefs = {}
 
@@ -3654,6 +3738,13 @@ class App(tk.Tk):
     # --- Menu handlers ---
     # --- [UI] _on_about --------------------------------------
     def _on_about(self):
+        """
+        Show an “About” dialog with version and environment information.
+
+        Displays app name/version, Python version, SNMP backend, and paths
+        to key files such as the SSH secrets and config file.
+        """
+        
         import tkinter.messagebox as mbox
         import platform
         
@@ -3724,7 +3815,8 @@ class App(tk.Tk):
     def load_config(self) -> dict:
         """
         Load config.json into memory. Falls back to defaults if missing
-        or malformed. Never raises.
+        or malformed. Never raises. Persist runtime config to disk including window geometry,
+        state, and panel width values stored in self.cfg.
         """
         try:
             if CONFIG_FILE.exists():
@@ -3967,6 +4059,14 @@ class App(tk.Tk):
 
     # --- [UI] _on_test_ssh --------------------------------------
     def _on_test_ssh(self):
+        """
+        Perform a quick SSH connectivity test to the UDM.
+
+        Uses the same credentials and host/port as the SSH collector, but runs
+        a short probe (device and console) without starting the background thread.
+        Shows a message box summarising which endpoints succeed or fail.
+        """
+        
         secrets = _load_ssh_secrets(SSH_SECRETS_FILE)
         host = UDM_SSH_HOST
         port = secrets.get("port", UDM_SSH_PORT)
@@ -4030,6 +4130,17 @@ class App(tk.Tk):
     # --- [UI|REFRESH] _refresh_ui ----------------------------------------------
     # Purpose: Drain alerts; render tables; update status; queue rDNS
     def _refresh_ui(self):
+        """
+        Periodically refresh the table contents and status bar from the Core state.
+
+        - Rebuilds the Alerts, Active, and Aggregates Treeviews from core.conn_map
+        and other cached structures.
+        - Reapplies row colour tags (unknown vendor, high volume, new device).
+        - Updates the status bar metrics (active count, MAC count, flow/SSH state,
+        clock skew warning).
+        - Reschedules itself using after() while the app is running.
+        """
+        
         import queue
 
         # --- [UI|NET] _fmt_dest ----------------------------------------------
@@ -4452,13 +4563,15 @@ class App(tk.Tk):
         ip = _HOSTNAMES._ip_from_hostport(local_hostport)
         return _HOSTNAMES.name_for_ip(ip) if ip else ""
 
-    # --- [UI|ALIASES] _on_set_hostname_alias --------------------------------
-    # Purpose: Prompt for a friendly name for the selected Active row's local IP
-    # --- [UI|ALIASES] _on_set_hostname_alias ------------------------------
-    # Purpose: Prompt for a friendly name for the selected Active row's local IP
-    
     # --- [UI|COPY] _copy_alerts ------------------------------------
     def _copy_alerts(self):
+        """
+        Copy the current Alerts table to the clipboard.
+
+        Uses the same formatting helper as _copy_active() so the output is
+        easy to inspect or share.
+        """
+
         rows = []
         header = ["Time","Local","MAC","Vendor","Remote","Hostname","Bytes","Note"]
         rows.append("\t".join(header))
@@ -4471,6 +4584,13 @@ class App(tk.Tk):
 
     # --- [UI|EXPORT] _export_snapshot ------------------------------------
     def _export_snapshot(self):
+        """
+        Export a CSV snapshot of the current monitor state to disk.
+
+        Writes a file containing at least the Active and/or Aggregates views,
+        using the same formatted values as shown in the UI, so you can inspect
+        historical data in Excel or other tools.
+        """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"snapshot_{ts}.csv"
         try:
@@ -4485,6 +4605,18 @@ class App(tk.Tk):
  
     # --- [UI|CLIP] _copy_to_clipboard ------------------------------------
     def _copy_to_clipboard(self, text: str, ok_msg: str):
+        """
+        Copy a text blob to the system clipboard and optionally show a toast.
+
+        Parameters
+        ----------
+        text : str
+            Text to place on the clipboard.
+        toast : str | None
+            Optional short message to display via the Windows toast notifier
+            (if available).
+        """
+
         try:
             self.clipboard_clear()
             self.clipboard_append(text)
@@ -4495,7 +4627,13 @@ class App(tk.Tk):
 
     # --- [UI|COPY] Copy visible Active table -------------------------------------
     def _copy_active(self):
-        # Pull visible items from the Treeview if present; else from core
+        """
+        Copy the current Active Connections table to the clipboard.
+
+        Formats the rows as a simple tab-separated or CSV-style text so it can
+        be pasted into a text editor or spreadsheet for further analysis.
+        """
+
         header = ["Local", "MAC", "Vendor", "Remote", "State", "First Seen", "Last Seen", "Bytes (TX)", ">1MB?"]
         rows = ["\t".join(header)]
 
@@ -4546,6 +4684,13 @@ class App(tk.Tk):
 
     # --- [UI|COPY] _copy_aggregates ------------------------------------
     def _copy_aggregates(self):
+        """
+        Copy the Per-Device Totals (Aggregates) table to the clipboard.
+
+        Useful for quickly exporting top talkers or device totals to another
+        tool without writing a file to disk.
+        """
+
         # Copy the visible Aggregates table (first COPY_LIMIT_ROWS rows)
         rows = []
         header = ["MAC", "Vendor", "Dest (IP:Port)", "Sightings", "Bytes"]
@@ -4694,8 +4839,16 @@ class App(tk.Tk):
         except Exception as e:
             self.status.set(f"Dump failed: {e}")
 
+    # --- [UI|ALIASES] _on_set_hostname_alias --------------------------------
+    # Purpose: Prompt for a friendly name for the selected Active row's local IP
     def _on_set_hostname_alias(self):
-        # Find a selected row in the Active Connections table (LAN device lives in 'local')
+        """
+        Create or update a hostname alias based on the current row selection.
+
+        Typically uses the selected IP address and an alias name entered by
+        the user, then persists the mapping so future refreshes display the
+        alias instead of only the raw IP.
+        """
         item = self.tree.selection()
         if not item:
             self.status.set("Select a row in Active Connections first.")
