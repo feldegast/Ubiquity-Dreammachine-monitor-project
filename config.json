@@ -3,33 +3,33 @@
     "active": {
       "bytes": 110,
       "dest": 420,
-      "first": 140,
+      "first": 20,
       "last": 140,
       "local": 160,
-      "mac": 160,
+      "mac": 84,
       "over1mb": 70,
       "vendor": 220
     },
     "agg": {
       "bytes": 110,
-      "dest": 420,
-      "mac": 160,
-      "sightings": 140,
+      "dest": 696,
+      "mac": 85,
+      "sightings": 20,
       "vendor": 220
     },
     "alerts": {
       "bytes": 110,
-      "dest": 420,
+      "dest": 448,
       "local": 160,
-      "mac": 160,
+      "mac": 82,
       "note": 120,
-      "time": 140,
+      "time": 20,
       "vendor": 220
     }
   },
   "copy_limit_rows": 200,
   "debug_log_tail_lines": 200,
-  "details_width": 291,
+  "details_width": 330,
   "enable_conntrack_ssh": true,
   "enable_netflow_v5_collector": false,
   "enable_toasts": false,
@@ -37,6 +37,6 @@
   "resolve_rdns": true,
   "router_ip": "192.168.1.1",
   "show_idle_devices": false,
-  "window_geometry": "1536x773+1934+489",
-  "window_state": "zoomed"
+  "window_geometry": "1536x773+192+73",
+  "window_state": "normal"
 }

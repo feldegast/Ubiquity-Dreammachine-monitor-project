@@ -71,12 +71,12 @@ except Exception:
 # Regex for splitting host:port strings
 _SPLIT_RE = re.compile(r"[,\|\t ]+")
 
+# endregion IMPORTS & GLOBALS
+
 # =============================================================================
 # SECTION: ENRICHMENT (Vendor lookup, Device naming)
 # =============================================================================
 # region ENRICHMENT
-
-# endregion IMPORTS & GLOBALS
 
 '''
 try:
@@ -114,7 +114,6 @@ DEBUG_LOG_TAIL_LINES = 200
 DEBUG = False
 monitor_core.DEBUG = DEBUG
 ConntrackCollectorSSH.DEBUG = DEBUG
-
 
 # ---- Windows toast (optional) ----
 ENABLE_TOASTS = False  # ← turn off the flaky win10toast path
@@ -156,18 +155,27 @@ DETAILS_LABEL_PADX           = (4, 4)
 DETAILS_VALUE_PADX           = (0, 4)
 DETAILS_ROW_PADY             = 2
 
+
+# ===== shared widths so first 4 columns align across tables =====
+COL_W_STATUS = 32
+COL_W_FIRST = 20
+COL_W_MAC   = 20
+COL_W_VEND  = 220
+COL_W_DEST  = 420
+COL_W_LOCAL = 160
+COL_W_LAST  = 140
+COL_W_BYTES = 110
+
 #table highlights
 UNKNOWN_VENDOR_BACKGROUND = "#FFECEC"
 HIGH_VOLUME_BACKGROUND    = "#D2F5FF"
 NEW_DEVICE_BACKGROUND     = "#F7FFD2"
 
 # status icon colours and size (image-based)
-STATUS_ICON_SIZE      = 10          # px – single source of truth for icon size
+STATUS_ICON_SIZE      = 12          # px – single source of truth for icon size
 COLOR_VENDOR_LABELLED = "#00C000"
 COLOR_VENDOR_KNOWN    = "#0077FF"
 COLOR_VENDOR_UNKNOWN  = "#C00000"
-
-STATUS_ICON_SIZE = 12
 
 # --- Enable SSH conntrack collector ---
 SSH_SECRETS_FILE = "ssh_secrets.json"
@@ -292,6 +300,8 @@ except Exception:
 
 # Normalize MAC to "AA:BB:CC:DD:EE:FF"
 _MAC_RE = re.compile(r"[0-9A-Fa-f]{2}")
+
+
 
 # --- [NET] load_mac_labels ------------------------------------
 def load_mac_labels() -> dict[str, str]:
@@ -851,8 +861,6 @@ monitor_core.POLL_INTERVAL_SECONDS = POLL_INTERVAL_SECONDS
 monitor_core.ALERT_THRESHOLD_BYTES = ALERT_THRESHOLD_BYTES
 monitor_core.ALERT_COOLDOWN_SECS = ALERT_COOLDOWN_SECS
 
-
-
 monitor_core.OID_ipNetToMediaNetAddress       = OID_ipNetToMediaNetAddress
 monitor_core.OID_ipNetToMediaPhysAddress      = OID_ipNetToMediaPhysAddress
 monitor_core.OID_ipNetToPhysicalPhysAddress   = OID_ipNetToPhysicalPhysAddress
@@ -867,6 +875,8 @@ monitor_core.DEBUG = DEBUG
 # SECTION: UTILITIES (helpers, formatting, parsing)
 # =============================================================================
 # region UTILITIES
+
+
 
 # --- [DNS|WORKER] dns_worker ------------------------------------
 def dns_worker(dns_q: "queue.Queue[str]"):
@@ -927,8 +937,6 @@ def tail_file(path: str, max_lines: int) -> str:
 # NetFlow v5 packet format reference
 NFV5_HEADER_FMT = "!HHIIIIBBH"   # version(2), count(2), sys_uptime(4), unix_secs(4), unix_nsecs(4), flow_seq(4), engine_type(1), engine_id(1), sampling(2)
 NFV5_RECORD_FMT = "!IIIHHIIIIHHBBBBHHBBH"  # 48 bytes per record
-
-# endregion  # NETWORK CORE
 
 # endregion NETWORK CORE
 
@@ -1600,7 +1608,6 @@ class App(tk.Tk):
         
         try:
             # Keep in sync with your build_ui constants
-            COL_W_FIRST = 140
             for tv in (self.alerts, self.tree, self.agg):
                 try:
                     first_col = tv["columns"][0]
@@ -2156,16 +2163,6 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-        # ===== shared widths so first 4 columns align across tables =====
-        COL_W_STATUS = 32
-        COL_W_FIRST = 140
-        COL_W_MAC   = 160
-        COL_W_VEND  = 220
-        COL_W_DEST  = 420
-        COL_W_LOCAL = 160
-        COL_W_LAST  = 140
-        COL_W_BYTES = 110
-
         # --- [UI|TABLES] _force_headings --------------------------------------------------
         def _force_headings(tv: ttk.Treeview, labels: dict[str, str]):
             """Apply column IDs + headings WITHOUT overriding tv['show'].
@@ -2186,9 +2183,11 @@ class App(tk.Tk):
 
             tv.after_idle(_reassert)
 
-        # =========================================================================
-        # === FOOTER (buttons above statusbar) ====================================
-        # =========================================================================
+        # =============================================================================
+        # SECTION: FOOTER (buttons above statusbar)
+        # =============================================================================
+        # region FOOTER (buttons above statusbar)
+
         foot = ttk.Frame(self)
         foot.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
         self.foot = foot
@@ -2205,9 +2204,14 @@ class App(tk.Tk):
         ttk.Button(foot, text="Export unknown MAC addresses",        command=self._on_copy_unknown_vendors_menu,).pack(side="left")
         ttk.Button(foot, text="Copy Debug Bundle",                   command=self._copy_debug_bundle,).pack(side="left", padx=(8, 12))
 
-        # =========================================================================
-        # === Statusbar (very bottom) =============================================
-        # =========================================================================
+        # endregion FOOTER (buttons above statusbar)
+
+
+        # =============================================================================
+        # SECTION: Statusbar (very bottom)
+        # =============================================================================
+        # region Statusbar (very bottom)
+        
         statusf = ttk.Frame(self)
         statusf.pack(side="bottom", fill="x", padx=8, pady=(2, 4))
 
@@ -2237,9 +2241,13 @@ class App(tk.Tk):
             side="right", padx=(8, 0)
         )
 
-        # =========================================================================
-        # === UI.CONTENT (everything that scrolls/expands) ========================
-        # =========================================================================
+        # endregion Statusbar (very bottom)
+        
+        # =============================================================================
+        # SECTION: UI.CONTENT (everything that scrolls/expands)
+        # =============================================================================
+        # region UI.CONTENT (everything that scrolls/expands)
+        
         # Outer horizontal paned: left = tables, right = details panel
         main_paned = ttk.PanedWindow(self, orient="horizontal")
         # Tighten padding so sidebar sits closer to the tables
@@ -2264,9 +2272,11 @@ class App(tk.Tk):
         # Kick off restoration of details width from config
         self.after(50, self._restore_details_width)
 
-        # =========================================================================
-        # === Alerts SECTION (top of left content) ================================
-        # =========================================================================
+        # =============================================================================
+        # SECTION: Alerts SECTION (top of left content)
+        # =============================================================================
+        # region Alerts SECTION (top of left content)
+
         alert_outer = ttk.Frame(paned)
         paned.add(alert_outer, weight=1)
 
@@ -2314,9 +2324,10 @@ class App(tk.Tk):
         _legend_item(legend, UNKNOWN_VENDOR_BACKGROUND, "Unknown / randomised")
         _legend_item(legend, HIGH_VOLUME_BACKGROUND, "High volume (≥ 1 MB)")
         
-        # Glyph legend (for the little squares shown in Vendor/Host column)
-        glyph_label = tk.Label(legend, text="Glyphs:  🟩 Labelled  •  🟦 Known vendor  •  🟥 Unknown/randomised", font=("Segoe UI Emoji", 9), anchor="w",)
-        glyph_label.pack(side="left", padx=(4, 0))
+        # Status icon meanings (same swatch style, status colours)
+        _legend_item(legend, COLOR_VENDOR_LABELLED, "Labelled host")
+        _legend_item(legend, COLOR_VENDOR_KNOWN,    "Known vendor")
+        _legend_item(legend, COLOR_VENDOR_UNKNOWN,  "Unknown/randomised")
         # ----end legand --------------------------------------------------------------
 
         # Alerts title now comes *below* the filter row
@@ -2363,10 +2374,10 @@ class App(tk.Tk):
         self.alerts.column("time",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
         self.alerts.column("mac",    width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.alerts.column("vendor", width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
-        self.alerts.column("dest",   width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=False, anchor="w")
+        self.alerts.column("dest",   width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=True, anchor="w")
         self.alerts.column("local",  width=COL_W_LOCAL, minwidth=COL_W_LOCAL, stretch=False, anchor="w")
         self.alerts.column("bytes",  width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
-        self.alerts.column("note",   width=180,         minwidth=120,         stretch=True,  anchor="w")
+        self.alerts.column("note",   width=180,         minwidth=120,         stretch=False,  anchor="w")
 
         self._apply_saved_column_widths("alerts", self.alerts)
 
@@ -2395,9 +2406,13 @@ class App(tk.Tk):
             lambda e: self._update_details_from_tree(self.alerts, "alerts"),
         )
 
-        # =========================================================================
-        # === Active Connections SECTION (middle of left content) =================
-        # =========================================================================
+        # endregion Alerts SECTION (top of left content)
+        
+        # =============================================================================
+        # SECTION: Active Connections (middle of left content)
+        # =============================================================================
+        # region Active Connections (middle of left content)
+
         active_outer = ttk.Frame(paned)
         paned.add(active_outer, weight=2)
 
@@ -2442,13 +2457,13 @@ class App(tk.Tk):
 
         # Define headings for the named columns
         for col, label in active_labels.items():
-            self.tree.heading(col, text=label, anchor="w")
+            self.tree.heading(col, text=label, anchor="center")
 
         # Column widths (same constants as before)
         self.tree.column("first",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
         self.tree.column("mac",     width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.tree.column("vendor",  width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
-        self.tree.column("dest",    width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=False, anchor="w")
+        self.tree.column("dest",    width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=True,  anchor="w")
         self.tree.column("local",   width=COL_W_LOCAL, minwidth=COL_W_LOCAL, stretch=False, anchor="w")
         self.tree.column("last",    width=COL_W_LAST,  minwidth=COL_W_LAST,  stretch=False, anchor="w")
         self.tree.column("bytes",   width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
@@ -2495,10 +2510,13 @@ class App(tk.Tk):
             lambda e: self._update_details_from_tree(self.tree, "active"),
         )
 
+        # endregion Active Connections (middle of left content)
 
-        # =========================================================================
-        # === Aggregates SECTION (bottom of left content) =========================
-        # =========================================================================
+        # =============================================================================
+        # SECTION: Aggregates (bottom of left content)
+        # =============================================================================
+        # region Aggregates (bottom of left content)
+
         agg_outer = ttk.Frame(content)
         agg_outer.pack(fill="both", expand=False, padx=8, pady=(0, 4))
 
@@ -2534,8 +2552,16 @@ class App(tk.Tk):
         self.agg.column("sightings", width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="e")
         self.agg.column("mac",       width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.agg.column("vendor",    width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
-        self.agg.column("dest",      width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=False, anchor="w")
+        self.agg.column("dest",      width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=True,  anchor="w")
         self.agg.column("bytes",     width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
+
+        # Clickable sorting for Aggregates
+        self._setup_sorting(
+            self.agg,
+            table_name="agg",
+            default_col="bytes",      # default: biggest talkers first
+            default_reverse=True,
+        )
 
         self.agg.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
         self.agg.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
@@ -2570,7 +2596,9 @@ class App(tk.Tk):
             self.after(250, self._refresh_ui)
         except Exception:
             pass
-
+        # endregion AAggregates (bottom of left content)
+        
+        # endregion UI.CONTENT (everything that scrolls/expands)
 # endregion UI WIDGETS
 
     # =============================================================================
@@ -2842,25 +2870,22 @@ class App(tk.Tk):
     # --- [UI|VENDOR STATUS ICONS] -----------------------------------------
     def _init_vendor_status_icons(self) -> None:
         """
-        Create small coloured squares for:
-          - 'Labelled'            (MAC has a hostname alias)
-          - 'Known vendor'        (OUI or vendor lookup succeeds)
-          - 'Unknown/randomised'  (no vendor match, or randomised MAC)
+        Create small coloured squares for 'Labelled', 'Known vendor', 'Unknown/randomised'.
 
         Uses tk.PhotoImage and stores them on self so they don't get GC'd.
         Call this once from _build_ui before inserting any rows.
         """
         if hasattr(self, "_status_icons"):
-            return  # already initialised
+            return
 
-        size = STATUS_ICON_SIZE  # from global constant
+        size = STATUS_ICON_SIZE  # <- from global constant
 
         def _square(color: str) -> tk.PhotoImage:
             img = tk.PhotoImage(width=size, height=size)
             img.put(color, to=(0, 0, size, size))  # fill solid
             return img
 
-        # Colours come from global constants so you can tweak them in one place.
+        # Colours now come from global constants
         self._status_icons: dict[str, tk.PhotoImage] = {
             "labelled": _square(COLOR_VENDOR_LABELLED),
             "known":    _square(COLOR_VENDOR_KNOWN),
@@ -3183,24 +3208,45 @@ class App(tk.Tk):
 
         numeric_cols = {
             # Alerts
-            "alerts:bytes", 
+            "alerts:bytes",
             # Active
-            "active:bytes", "active:over1mb",
+            "active:bytes",
             # Aggregates
-            "agg:sightings", "agg:bytes"
+            "agg:sightings", "agg:bytes",
+        }
+
+        time_cols = {
+            "alerts:time",
+            "active:first",
+            "active:last",
         }
 
         def _sort_key(table: str, col: str, val: str):
+            from datetime import datetime
+
             keyid = f"{table}:{col}"
             v = "" if val is None else str(val)
+
+            # Numeric columns
             if keyid in numeric_cols:
                 try:
                     return int(v.replace(",", ""))
                 except Exception:
                     return 0
+
+            # Boolean-ish column (>1MB? Yes/No)
             if table == "active" and col == "over1mb":
                 return 1 if v.strip().lower() in ("yes", "true", "1") else 0
-            # ISO-ish times sort as strings reasonably; leave as is
+
+            # Time-like columns – parse ISO timestamps
+            if keyid in time_cols:
+                try:
+                    return datetime.fromisoformat(v)
+                except Exception:
+                    # push invalid/blank to the top
+                    return datetime.min
+
+            # Fallback: case-insensitive string
             return v.lower()
 
         def _do_sort(col: str):
@@ -3246,15 +3292,42 @@ class App(tk.Tk):
         # Calling _setup_sorting once already installed the header commands;
         # we just trigger a sort by faking a header click (same logic):
         rows = [(iid, tree.set(iid, col)) for iid in tree.get_children("")]
+
+        numeric_cols = {
+            "alerts:bytes",
+            "active:bytes",
+            "agg:sightings", "agg:bytes",
+        }
+
+        time_cols = {
+            "alerts:time",
+            "active:first",
+            "active:last",
+        }
+
         def _sort_key(val: str):
-            # piggyback the same mapper as _setup_sorting (duplicated tiny version):
+            from datetime import datetime
+
             v = "" if val is None else str(val)
-            if f"{table_name}:{col}" in {"alerts:bytes","active:bytes","active:over1mb","agg:sightings","agg:bytes"}:
-                try: return int(v.replace(",", ""))
-                except Exception: return 0
+            keyid = f"{table_name}:{col}"
+
+            if keyid in numeric_cols:
+                try:
+                    return int(v.replace(",", ""))
+                except Exception:
+                    return 0
+
             if table_name == "active" and col == "over1mb":
-                return 1 if v.strip().lower() in ("yes","true","1") else 0
+                return 1 if v.strip().lower() in ("yes", "true", "1") else 0
+
+            if keyid in time_cols:
+                try:
+                    return datetime.fromisoformat(v)
+                except Exception:
+                    return datetime.min
+
             return v.lower()
+        
         rows.sort(key=lambda t: _sort_key(t[1]), reverse=reverse_hint)
         for idx, (iid, _) in enumerate(rows):
             tree.move(iid, "", idx)
@@ -3737,9 +3810,10 @@ class App(tk.Tk):
             
         with self.core.data_lock:
 
-        # ==============================================================
-        # === REFRESH.ALERTS (top) - drain queue, insert rows, toast ===
-        # ==============================================================
+        # =============================================================================
+        # SECTION: REFRESH.ALERTS (top) - drain queue, insert rows, toast
+        # =============================================================================
+        # region REFRESH.ALERTS (top) - drain queue, insert rows, toast
 
             try:
                 while True:
@@ -3814,9 +3888,12 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-            # ==============================================================
-            # === REFRESH.ACTIVE (middle) - CONNECTIONS ====================
-            # ==============================================================
+        # endregion REFRESH.ALERTS (top) - drain queue, insert rows, toast
+        
+        # =============================================================================
+        # SECTION: REFRESH.ACTIVE (middle) - CONNECTIONS
+        # =============================================================================
+        # region REFRESH.ACTIVE (middle) - CONNECTIONS
 
             self.tree.delete(*self.tree.get_children())
 
@@ -3883,10 +3960,12 @@ class App(tk.Tk):
                     values=tuple(row_vals),
                     tags=tags,
                 )
-
-            # ==============================================================
-            # === REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS ==========
-            # ==============================================================
+        # endregion REFRESH.ACTIVE (middle) - CONNECTIONS
+        
+        # =============================================================================
+        # SECTION: REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS
+        # =============================================================================
+        # region REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS
 
             self.agg.delete(*self.agg.get_children())
 
@@ -3957,7 +4036,10 @@ class App(tk.Tk):
                         ),
                         tags=tags,
                     )
+        
 
+        # endregion REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS
+        
         # Re-apply any remembered sort on all tables
         try:
             self._reapply_sort_if_any("alerts", self.alerts)
@@ -3966,7 +4048,11 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # ---------------- status line (top-right) + ssh status echo -------------
+        # =============================================================================
+        # SECTION: STATUS LINE - SSH STATUS ECHO
+        # =============================================================================
+        # region STATUS LINE - SSH STATUS ECHO
+        
         nf_status = "OFF"
         if self.nf:
             if isinstance(self.nf, ConntrackCollectorSSH):
@@ -4066,7 +4152,9 @@ class App(tk.Tk):
                 import traceback
                 print("[UI|STATUS] exception:")
                 traceback.print_exc()
-
+        
+        # endregion STATUS LINE - SSH STATUS ECHO
+        
         # finally, reschedule next refresh
         if getattr(self, "_ui_ready", False):
             try:
