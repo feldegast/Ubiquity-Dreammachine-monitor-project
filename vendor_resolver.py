@@ -158,7 +158,15 @@ class _VendorResolver:
 
         return self.for_mac(mac_n)
 
+    # --- Backwards-compat shims ------------------------------------
+    def vendor_for_mac(self, mac: str | None) -> str:
+        """Compat: old code expects a .vendor_for_mac() method."""
+        return self.for_mac(mac)
 
+    def vendor_for_display(self, mac: str | None) -> str:
+        """Compat: old code expects a .vendor_for_display() method."""
+        return self.for_display(mac)
+    
 # Singleton
 _RESOLVER = _VendorResolver()
 

@@ -18,13 +18,24 @@ import threading
 import time
 import webbrowser
 
-from datetime import datetime
+import monitor_core
+from monitor_core import (
+    MonitorCore, 
+    walk_arp_table,
+    _walk_ipnet_physical,
+    _walk_at_mib,
+    normalize_mac,
+)
+
 from collections import defaultdict
+
+from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Iterable, Dict, Optional
+from tkinter import filedialog
 
-from vendor_resolver import vendor_for_display as lookup_vendor, update_vendor_db_now
+from vendor_resolver import update_vendor_db_now
 from collectors import NetflowV5Collector, ConntrackCollectorSSH
 
 # ---- Vendor lookup (optional) ----
@@ -101,6 +112,10 @@ LOG_FILENAME = "traffic_log.csv"
 COPY_LIMIT_ROWS = 200
 DEBUG_LOG_TAIL_LINES = 200
 DEBUG = False
+monitor_core.DEBUG = DEBUG
+ConntrackCollectorSSH.DEBUG = DEBUG
+
+
 # ---- Windows toast (optional) ----
 ENABLE_TOASTS = False  # ← turn off the flaky win10toast path
 
@@ -146,6 +161,14 @@ UNKNOWN_VENDOR_BACKGROUND = "#FFECEC"
 HIGH_VOLUME_BACKGROUND    = "#D2F5FF"
 NEW_DEVICE_BACKGROUND     = "#F7FFD2"
 
+# status icon colours and size (image-based)
+STATUS_ICON_SIZE      = 10          # px – single source of truth for icon size
+COLOR_VENDOR_LABELLED = "#00C000"
+COLOR_VENDOR_KNOWN    = "#0077FF"
+COLOR_VENDOR_UNKNOWN  = "#C00000"
+
+STATUS_ICON_SIZE = 12
+
 # --- Enable SSH conntrack collector ---
 SSH_SECRETS_FILE = "ssh_secrets.json"
 UDM_SSH_HOST = ROUTER_IP
@@ -154,16 +177,26 @@ UDM_SSH_PORT = 22           # usually 22
 CONNTRACK_POLL_SECS = 3
 # --- End SSH conntrack collector ---
 
-SNMP_COMMUNITY = "public"
+monitor_core.SNMP_COMMUNITY = SNMP_COMMUNITY = "public"
 
 # Which LANs count as "client devices"
-#LAN_PREFIXES = ["192.168.1.0/24", "10.27.10.0/24"]
-LAN_PREFIXES = []
+# LAN_PREFIXES = ["192.168.1.0/24", "10.27.10.0/24"]
+
+# Which LANs count as "client devices"
+LAN_PREFIXES = [
+    "192.168.1.0/24",
+    "192.168.22.0/24",
+    "192.168.152.0/24",
+    "10.57.13.0/24",   # VPN subnet if you want to include it
+]
+
 try:
     _LAN_NETWORKS = [ipaddress.ip_network(p, strict=False) for p in LAN_PREFIXES]
 except Exception:
     _LAN_NETWORKS = []
 
+# Push the compiled networks into monitor_core
+monitor_core._LAN_NETWORKS = _LAN_NETWORKS
 
 # NetFlow v5 collector (UDP)
 NETFLOW_LISTEN_IP = "0.0.0.0"
@@ -199,6 +232,10 @@ HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
 MAC_LABELS_PATH = DATA_DIR / "mac_labels.json" # was mac-vendor-overrides.txt before changed to JSON
 MAC_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+# Vendor enrichment overrides (OUI / full-MAC → vendor), JSON-based
+VENDOR_OVERRIDES_JSON = DATA_DIR / "vendor_overrides.json"
+VENDOR_OVERRIDES_JSON.parent.mkdir(parents=True, exist_ok=True)
+
 #VENDOR_DB = VendorDB(base_dir=BASE_DIR)
 #DEVICE_NAMER = DeviceNamer(base_dir=BASE_DIR)
 # endregion ENRICHMENT
@@ -218,6 +255,16 @@ BUILTIN_OUI = {
     "D8:BB:2C": "Apple",
     "F0:18:98": "Samsung",
     "FC:45:C3": "Samsung",
+    
+    
+    "3C:2A:F4": "Brother Industries",
+    "00:18:DD": "Silicondust Engineering",
+    "38:22:E2": "HP Inc.",
+    "34:31:7F": "Panasonic Appliances",
+    "D8:5E:D3": "Gigabyte",
+    "B0:F7:C4": "Amazon Technologies",
+    "38:F7:3D": "Amazon Technologies",
+    "3C:8C:93": "Juniper Networks",
 }
 
 # Optional local overrides you want to force (OUI = first 3 bytes)
@@ -228,7 +275,7 @@ LOCAL_OUI_OVERRIDES = {
 }
 
 # Treat these as unknown
-ZERO_MACS = {"00:00:00:00:00:00", "00-00-00-00-00-00", "", None}
+ZERO_MACS = monitor_core.ZERO_MACS = {"00:00:00:00:00:00", "00-00-00-00-00-00", "", None}
 
 # Safe, dependency-tolerant imports
 try:
@@ -586,6 +633,8 @@ def _snmp_walk_v2_pythonic(host, community, oid):
     for vb in client.walk(oid):
         yield str(vb.oid), vb.value
 
+
+
 # --- [SNMP] _snmp_walk_v2_raw ------------------------------------
 def _snmp_walk_v2_raw(host, community, oid):
     m = import_module("puresnmp.api.raw")
@@ -642,13 +691,14 @@ def snmp_walk(host, community, oid):
     if _snmp_backend is None:
         return iter(())  # graceful no-op if puresnmp unavailable
     return _snmp_backend(host, community, oid)
+monitor_core.snmp_walk = snmp_walk
 
 # endregion SNMP BACKEND
 
 # numeric OIDs (no MIB files needed)
 OID_ifName                  = "1.3.6.1.2.1.31.1.1.1.1"      # IF-MIB::ifName
-OID_ipNetToMediaPhysAddress = "1.3.6.1.2.1.4.22.1.2"        # IP-MIB::ipNetToMediaPhysAddress
-OID_ipNetToMediaNetAddress  = "1.3.6.1.2.1.4.22.1.3"        # IP-MIB::ipNetToMediaNetAddress
+monitor_core.OID_ipNetToMediaPhysAddress = OID_ipNetToMediaPhysAddress = "1.3.6.1.2.1.4.22.1.2"        # IP-MIB::ipNetToMediaPhysAddress
+monitor_core.OID_ipNetToMediaNetAddress  = OID_ipNetToMediaNetAddress  = "1.3.6.1.2.1.4.22.1.3"        # IP-MIB::ipNetToMediaNetAddress
 OID_tcpConnState            = "1.3.6.1.2.1.6.13.1.1"        # TCP-MIB::tcpConnState
 
 TCP_STATE = {
@@ -669,10 +719,10 @@ TCP_STATE = {
 # ====== ARP / NEIGHBOR TABLES (robust) ======
 
 # Additional tables & OIDs
-OID_ipNetToPhysicalPhysAddress = "1.3.6.1.2.1.4.35.1.4"
+monitor_core.OID_ipNetToPhysicalPhysAddress = OID_ipNetToPhysicalPhysAddress = "1.3.6.1.2.1.4.35.1.4"
 # Legacy AT-MIB (some firmwares still populate this)
-OID_atPhysAddress = "1.3.6.1.2.1.3.1.1.2"
-OID_atNetAddress  = "1.3.6.1.2.1.3.1.1.3"
+monitor_core.OID_atPhysAddress =  OID_atPhysAddress = "1.3.6.1.2.1.3.1.1.2"
+monitor_core.OID_atNetAddress =  OID_atNetAddress  = "1.3.6.1.2.1.3.1.1.3"
 
 # --- [SNMP|ARP] _parse_mac_from_val ------------------------------------
 # Purpose: robust MAC parser
@@ -698,111 +748,7 @@ def _parse_mac_from_val(val) -> str:
             raw = b""
     mac = ":".join(f"{b:02X}" for b in raw)
     return mac or "00:00:00:00:00:00"
-
-# --- [SNMP|ARP] walk_arp_table ------------------------------------
-# Purpose: Build (ifIndex, ip, mac) rows by merging ipNetToMedia* and ipNetToPhysical*
-def walk_arp_table():
-    """Return [(ifIndex, ip, mac)] via IP-MIB ipNetToMedia* (classic ARP)."""
-    ip_entries, mac_entries = {}, {}
-    # ipNetToMediaNetAddress — use index for IP
-    try:
-        for oid, _val in snmp_walk(ROUTER_IP, SNMP_COMMUNITY, OID_ipNetToMediaNetAddress):
-            parts = str(oid).split(".")
-            if len(parts) < 5: continue
-            try:
-                ifIndex = int(parts[-5])
-                ip = ".".join(parts[-4:])
-                ip_entries[(ifIndex, ip)] = True
-            except Exception:
-                continue
-    except Exception:
-        pass
-    # ipNetToMediaPhysAddress — MAC
-    try:
-        for oid, val in snmp_walk(ROUTER_IP, SNMP_COMMUNITY, OID_ipNetToMediaPhysAddress):
-            parts = str(oid).split(".")
-            if len(parts) < 5: continue
-            try:
-                ifIndex = int(parts[-5])
-                ip = ".".join(parts[-4:])
-                mac = _parse_mac_from_val(val)
-                mac_entries[(ifIndex, ip)] = mac
-            except Exception:
-                continue
-    except Exception:
-        pass
-    rows = []
-    for key in set(ip_entries.keys()) | set(mac_entries.keys()):
-        ifIndex, ip = key
-        mac = mac_entries.get(key, "00:00:00:00:00:00")
-        rows.append((ifIndex, ip, mac))
-    return rows
-
-# --- [IP-MIB|NEIGHBOR] _walk_ipnet_physical ------------------------------------
-def _walk_ipnet_physical():
-    """Return [(ip, mac)] via IP-MIB ipNetToPhysicalPhysAddress (IPv4 only)."""
-    rows = []
-    try:
-        for oid, val in snmp_walk(ROUTER_IP, SNMP_COMMUNITY, OID_ipNetToPhysicalPhysAddress):
-            parts = [int(x) for x in str(oid).split(".")]
-            if len(parts) < 6: continue
-            addr_len = parts[-5]; addr_type = parts[-6]
-            if addr_type != 1 or addr_len != 4:  # IPv4 only
-                continue
-            a,b,c,d = parts[-4:]
-            ip = f"{a}.{b}.{c}.{d}"
-            mac = _parse_mac_from_val(val)
-            if mac and mac != "00:00:00:00:00:00":
-                rows.append((ip, mac))
-    except Exception:
-        pass
-    return rows
-
-# --- [IP-MIB] _walk_at_mib ------------------------------------
-def _walk_at_mib():
-    """Legacy AT-MIB fallback: returns [(ip, mac)]."""
-    ips, macs = {}, {}
-    try:
-        for oid, val in snmp_walk(ROUTER_IP, SNMP_COMMUNITY, OID_atNetAddress):
-            parts = str(oid).split(".")
-            if len(parts) < 1: continue
-            try:
-                ip = ".".join(parts[-4:])
-                ips[ip] = True
-            except Exception:
-                continue
-    except Exception:
-        pass
-    try:
-        for oid, val in snmp_walk(ROUTER_IP, SNMP_COMMUNITY, OID_atPhysAddress):
-            mac = _parse_mac_from_val(val)
-            parts = str(oid).split(".")
-            if len(parts) < 1: continue
-            try:
-                ip = ".".join(parts[-4:])
-                macs[ip] = mac
-            except Exception:
-                continue
-    except Exception:
-        pass
-    rows = []
-    for ip in set(ips) | set(macs):
-        rows.append((ip, macs.get(ip, "00:00:00:00:00:00")))
-    return rows
-
-# --- [IP-MIB] normalize_mac ------------------------------------
-def normalize_mac(mac) -> str:
-    """Return normalized 'AA:BB:CC:DD:EE:FF' or '' for empties/zeros."""
-    if mac is None:
-        return ""
-    s = str(mac).strip().upper().replace("-", ":")
-    if not s:
-        return ""
-    if ":" not in s and len(s) == 12:
-        s = ":".join(s[i:i+2] for i in range(0, 12, 2))
-    if s in ZERO_MACS:
-        return ""
-    return s
+monitor_core._parse_mac_from_val = _parse_mac_from_val
 
 # --- [IP-MIB] normalize_mac ------------------------------------
 def prepare_row_for_ui(row: dict) -> dict:
@@ -895,26 +841,47 @@ def walk_tcp_connections():
     except Exception:
         pass
     return conns
+monitor_core.walk_tcp_connections = walk_tcp_connections
+
+# --- Wire SNMP-related settings into monitor_core ---
+monitor_core.ROUTER_IP = ROUTER_IP
+monitor_core.SNMP_COMMUNITY = SNMP_COMMUNITY
+
+monitor_core.POLL_INTERVAL_SECONDS = POLL_INTERVAL_SECONDS
+monitor_core.ALERT_THRESHOLD_BYTES = ALERT_THRESHOLD_BYTES
+monitor_core.ALERT_COOLDOWN_SECS = ALERT_COOLDOWN_SECS
+
+
+
+monitor_core.OID_ipNetToMediaNetAddress       = OID_ipNetToMediaNetAddress
+monitor_core.OID_ipNetToMediaPhysAddress      = OID_ipNetToMediaPhysAddress
+monitor_core.OID_ipNetToPhysicalPhysAddress   = OID_ipNetToPhysicalPhysAddress
+monitor_core.OID_atNetAddress                 = OID_atNetAddress
+monitor_core.OID_atPhysAddress                = OID_atPhysAddress
+
+monitor_core.snmp_walk = snmp_walk
+monitor_core.walk_tcp_connections = walk_tcp_connections
+monitor_core.DEBUG = DEBUG
 
 # =============================================================================
 # SECTION: UTILITIES (helpers, formatting, parsing)
 # =============================================================================
 # region UTILITIES
-# --- [UTIL|IPRANGE] _is_lan_client_ip ------------------------------------
-# Purpose: Filter to private/LAN IPs (or user-listed prefixes)
-def _is_lan_client_ip(ip: str) -> bool:
-    try:
-        ipobj = ipaddress.ip_address(ip)
-        # Never treat loopback or the router itself as a client
-        if ipobj.is_loopback or ip == ROUTER_IP:
-            return False
-        if _LAN_NETWORKS:
-            return any(ipobj in net for net in _LAN_NETWORKS)
-        else:
-            # Auto-mode: accept any private address (10/8, 172.16/12, 192.168/16)
-            return ipobj.is_private
-    except Exception:
-        return False
+
+# --- [DNS|WORKER] dns_worker ------------------------------------
+def dns_worker(dns_q: "queue.Queue[str]"):
+    """Background rDNS resolver that consumes IPs from dns_q and fills the caches."""
+    while True:
+        ip = dns_q.get()
+        if ip is None:
+            break
+        with _dns_lock:
+            if ip in _dns_cache:
+                continue
+        name = _rdns_lookup(ip, RDNS_TIMEOUT)
+        with _dns_lock:
+            _dns_cache[ip] = name  # may be None
+            _dns_pending.discard(ip)
 
 # --- [UTIL|FORMAT] ip_to_str ------------------------------------
 def ip_to_str(ip_int):
@@ -943,21 +910,6 @@ def _rdns_lookup(ip: str, timeout: float) -> str | None:
     t.start()
     t.join(timeout + 0.1)  # small cushion
     return result[0]
-
-# --- [DNS|WORKER] dns_worker ------------------------------------
-def dns_worker(dns_q: "queue.Queue[str]"):
-    """Background rDNS resolver that consumes IPs from dns_q and fills the caches."""
-    while True:
-        ip = dns_q.get()
-        if ip is None:
-            break
-        with _dns_lock:
-            if ip in _dns_cache:
-                continue
-        name = _rdns_lookup(ip, RDNS_TIMEOUT)
-        with _dns_lock:
-            _dns_cache[ip] = name  # may be None
-            _dns_pending.discard(ip)
 
 # --- [UTIL|FILEIO|TAIL] tail_file ------------------------------------
 def tail_file(path: str, max_lines: int) -> str:
@@ -992,375 +944,6 @@ NFV5_RECORD_FMT = "!IIIHHIIIIHHBBBBHHBBH"  # 48 bytes per record
 # =============================================================================
 # region AGGREGATION
     
-# ---- Monitor core tying SNMP + NetFlow together ----
-class MonitorCore:
-    
-    # --- [CORE|INIT] __init__ ------------------------------------
-    def __init__(self, nf_collector=None):
-        self.stop = threading.Event()
-        self.data_lock = threading.Lock()
-        self.conn_map = {}  # key -> record (augmented)
-        self.aggregates = defaultdict(lambda: defaultdict(lambda: {"sightings":0, "bytes":0}))
-        self.ip2mac = {}
-        self._last_ip2mac_count = None
-        self.nf = nf_collector
-        
-        # Lightweight debug counters for the status line
-        self.last_counts = {"arp": 0, "tcp": 0, "flows": 0}
-
-        self._log_init()
-        self.alert_q = queue.Queue()
-        self._alerts_last_sent = {}  # key -> last_alert_epoch
-        
-        # Init alert CSV
-        try:
-            with open(ALERT_LOG_FILENAME, "a", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                if f.tell() == 0:
-                    w.writerow(["timestamp","local_ip","local_port","local_mac","vendor",
-                                "remote_ip","remote_port","hostname","bytes_tx","note"])
-        except Exception:
-            pass
-
-    # --- MAC Lookup (simple version) ------------------------------------
-    def get_mac_for_ip(self, ip: str) -> str | None:
-        # Return cached value if present
-        mac = self.ip2mac.get(ip)
-        if mac:
-            return mac
-
-        # Otherwise try to refresh ARP table
-        try:
-            self._refresh_arp()  # Safe, already exists in your code
-            mac = self.ip2mac.get(ip)
-            return mac
-        except Exception:
-            return None
-
-    # =============================================================================
-    # SECTION: STORAGE (files, CSV/JSON, load/save)
-    # =============================================================================
-    # region STORAGE
-
-   # --- [ALERT] _alert_emit ------------------------------------
-   # Purpose: Queue + CSV persist for threshold hits
-    def _alert_emit(self, rec, note="≥ threshold"):
-        nowiso = datetime.now().isoformat(timespec="seconds")
-        hostname = ""
-        try:
-            hostname = socket.gethostbyaddr(rec["remote_ip"])[0]
-        except Exception:
-            hostname = ""
-        # enqueue for UI
-        alert = {
-            "time": nowiso,
-            "local": f'{rec["local_ip"]}:{rec["local_port"]}',
-            "mac": rec["local_mac"],
-            "vendor": rec["vendor"],
-            "remote": f'{rec["remote_ip"]}:{rec["remote_port"]}',
-            "hostname": hostname,
-            "bytes": rec.get("bytes_tx") or 0,
-            "note": note,
-        }
-        try:
-            self.alert_q.put_nowait(alert)
-        except Exception:
-            pass
-        # persist
-        try:
-            with open(ALERT_LOG_FILENAME, "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow([
-                    nowiso, rec["local_ip"], rec["local_port"], rec["local_mac"], rec["vendor"],
-                    rec["remote_ip"], rec["remote_port"], hostname, rec.get("bytes_tx") or 0, note
-                ])
-        except Exception:
-            pass
-
-    # --- [STORAGE|CSVINIT] _log_init ------------------------------------
-    def _log_init(self):
-        try:
-            with open(LOG_FILENAME, "a", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                if f.tell() == 0:
-                    w.writerow(["timestamp","local_ip","local_port","local_mac","vendor",
-                                "remote_ip","remote_port","state","bytes_tx","over_1mb"])
-        except Exception:
-            pass
-
-    # --- [STORAGE|CSVAPPEND] _log_row ------------------------------------
-    def _log_row(self, row):
-        try:
-            with open(LOG_FILENAME, "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(row)
-        except Exception:
-            pass
- 
-    # endregion STORAGE
-
-    # --- [SNMP|ARP] _refresh_arp ------------------------------------
-    def _refresh_arp(self):
-        # SNMP-first
-        ip2mac = _merge_ip2mac_from_snmp()
-
-        # SSH fallback (see next step) — only if still empty
-        if not ip2mac and isinstance(self.nf, ConntrackCollectorSSH):
-            for ip, mac in self.nf.get_ip_neigh_snapshot():
-                try:
-                    ipaddress.ip_address(ip)
-                    if mac and mac != "00:00:00:00:00:00":
-                        ip2mac[ip] = mac.upper()
-                except Exception:
-                    continue
-
-        self.last_counts["arp"] = len(ip2mac)
-        self.ip2mac = ip2mac
-
-    # --- [FALLBACK|FLOWS] _flows_from_conntrack ------------------------------------
-    def _flows_from_conntrack(self):
-        """
-        If we have an SSH conntrack collector but SNMP returned no connections,
-        synthesize rows from the conntrack bytes map.
-        Returns a list of dicts like walk_tcp_connections() would.
-        """
-        flows = []
-        if not isinstance(self.nf, ConntrackCollectorSSH):
-            return flows
-
-        # Snapshot keys to avoid locking for long
-        try:
-            with self.nf.lock:
-                items = list(self.nf.bytes_by_flow.items())
-        except Exception:
-            items = []
-
-        for (src_ip, src_port, dst_ip, dst_port, proto), _b in items:
-            if proto != 6:  # TCP only
-                continue
-
-            # Heuristic: LAN client is the private IP
-            def _is_priv(ip):
-                try:
-                    return ipaddress.ip_address(ip).is_private
-                except Exception:
-                    return False
-
-            if _is_priv(src_ip) and not _is_priv(dst_ip):
-                local_ip, local_port = src_ip, src_port
-                remote_ip, remote_port = dst_ip, dst_port
-            elif _is_priv(dst_ip) and not _is_priv(src_ip):
-                # rare case: reverse (download). Still show from local → remote
-                local_ip, local_port = dst_ip, dst_port
-                remote_ip, remote_port = src_ip, src_port
-            else:
-                # both private or both public — skip (can’t tell)
-                continue
-
-            # Respect LAN filter
-            if not _is_lan_client_ip(local_ip):
-                continue
-
-            flows.append({
-                "local_ip": local_ip,
-                "local_port": int(local_port),
-                "remote_ip": remote_ip,
-                "remote_port": int(remote_port),
-                "state": "established"  # we don't have states from conntrack listing here
-            })
-        return flows
-
-    # =============================================================================
-    # SECTION: AGGREGATION (flows, bytes, top-N)
-    # =============================================================================
-    # region AGGREGATION
-
-# --- [NET] normalize_mac ------------------------------------
-    def normalize_mac(mac):
-        if not mac: return None
-        mac = str(mac).strip().upper().replace("-", ":")
-        return None if mac in ZERO_MACS else mac
-
-    # --- [CORE|UPDATE] _update_connections ------------------------------------
-    # Purpose: Merge SNMP/flows; update conn_map, aggregates, alerts
-    def _update_connections(self):
-        now = datetime.now().isoformat(timespec="seconds")
-
-        # Primary source: SNMP TCP-MIB
-        conns = walk_tcp_connections()
-        self.last_counts["tcp"] = len(conns)
-
-        # Fallback: if router doesn't expose TCP-MIB, synthesize connections
-        # from the flow source (Conntrack SSH or NetFlow v5)
-        if not conns and self.nf:
-            flows = []
-            try:
-                with self.nf.lock:
-                    for (s_ip, s_po, d_ip, d_po, proto), b in self.nf.bytes_by_flow.items():
-                        if proto != 6:
-                            continue
-                        if not _is_lan_client_ip(s_ip):
-                            continue
-                        if d_ip == "0.0.0.0":
-                            continue
-                        flows.append((s_ip, s_po, d_ip, d_po))
-            except Exception:
-                pass
-
-            self.last_counts["flows"] = len(flows)
-
-            # Synthesize "established" connection rows from flows
-            conns = [
-                {
-                    "local_ip": s_ip,
-                    "local_port": int(s_po),
-                    "remote_ip": d_ip,
-                    "remote_port": int(d_po),
-                    "state": "established",
-                }
-                for (s_ip, s_po, d_ip, d_po) in flows
-            ]
-        else:
-            # If we *did* get SNMP connections, just report the flow-map size (if any)
-            if self.nf:
-                try:
-                    with self.nf.lock:
-                        self.last_counts["flows"] = len(getattr(self.nf, "bytes_by_flow", {}))
-                except Exception:
-                    self.last_counts["flows"] = 0
-            else:
-                self.last_counts["flows"] = 0
-
-        # --- Update conn_map + aggregates + alert logic ---
-        now = datetime.now().isoformat(timespec="seconds")
-        for c in conns:
-            local_ip    = c["local_ip"]
-            local_port  = c["local_port"]
-            remote_ip   = c["remote_ip"]
-            remote_port = c["remote_port"]
-            state       = c["state"]
-
-            if not _is_lan_client_ip(local_ip):
-                continue
-
-            
-            #mac = (self.ip2mac.get(local_ip, "00:00:00:00:00:00") or "").upper() # old
-            #mac = self.ip2mac.get(local_ip, "00:00:00:00:00:00") or self.get_mac_for_ip(local_ip, "00:00:00:00:00:00") # new
-            mac = self.get_mac_for_ip(local_ip) or "00:00:00:00:00:00"
-            vendor = vendor_for_mac(mac)
-            key = (local_ip, local_port, remote_ip, remote_port)
-
-            # --- Optional suppressors (whitelist/silence) ---
-            dest_tag = f"{remote_ip}:{remote_port}"
-            if dest_tag in _WHITELIST_DESTS:
-                #If you’d prefer whitelisted rows to show but never alert, switch the continue to no_alert = True:
-                # no_alert = True
-                continue  # skip completely
-
-            if mac in _SILENCED_MACS:
-                #If you’d prefer whitelisted rows to show but never alert, switch the continue to no_alert = True:
-                # no_alert = True
-                continue  # skip completely
-
-            rec = self.conn_map.get(key)
-            if rec is None:
-                rec = {
-                    "local_ip": local_ip,
-                    "local_port": local_port,
-                    "remote_ip": remote_ip,
-                    "remote_port": remote_port,
-                    "state": state,
-                    "local_mac": mac,
-                    "vendor": vendor,
-                    "first_seen": now,
-                    "last_seen": now,
-                    "bytes_tx": 0,
-                    "over_1mb": False
-                }
-                self.conn_map[key] = rec
-            else:
-                rec["last_seen"] = now
-                rec["state"] = state
-                rec["local_mac"] = mac
-                rec["vendor"] = vendor
-
-            # bytes from NetFlow or conntrack
-            if self.nf:
-                b = self.nf.get_bytes_for(local_ip, local_port, remote_ip, remote_port)
-                rec["bytes_tx"] = b
-
-                # threshold detection
-                if b >= ALERT_THRESHOLD_BYTES and not rec["over_1mb"]:
-                    rec["over_1mb"] = True
-                    last_alert = self._alerts_last_sent.get(key, 0.0)
-                    now_mono = time.monotonic()
-                    if now_mono - last_alert >= ALERT_COOLDOWN_SECS:
-                        self._alerts_last_sent[key] = now_mono
-                        self._alert_emit(rec)
-
-            # Aggregates
-            agg = self.aggregates[mac][(remote_ip, remote_port)]
-            agg["sightings"] += 1
-            agg["bytes"] = max(agg["bytes"], rec["bytes_tx"] or 0)
-    # endregion  # AGGREGATION
-
-    # --- [CORE] Provide rows for UI / clipboard ----------------------------------
-    def get_active_rows(self, limit: int = 200) -> list[dict]:
-        """
-        Return a list of 'active connection' dicts.
-        Expected keys (best-effort): local_ip, local_port, remote_ip, remote_port,
-        tcp_state/state, first_seen, last_seen, bytes/bytes_tx, local_mac.
-        """
-        try:
-            # If your engine already maintains a map/dict; otherwise adapt here.
-            # This assumes self.conn_map is a dict of {key: rec}
-            base = list(getattr(self, "conn_map", {}).values())
-        except Exception:
-            base = []
-
-        # Sort by last_seen desc if available
-        def _key(rec):
-            return rec.get("last_seen") or rec.get("first_seen") or ""
-        base.sort(key=_key, reverse=True)
-        return base[:limit]
-
-    def prepare_row_for_ui(self, rec: dict) -> dict:
-        """
-        Normalize one record for UI:
-        - ensure local_mac normalized
-        - add vendor
-        """
-        out = dict(rec)
-        lip = out.get("local_ip") or out.get("src_ip")
-        mac = out.get("local_mac") or out.get("src_mac")
-
-        # If you have a helper that resolves MAC by IP, use it; otherwise skip
-        if not mac and lip and hasattr(self, "get_mac_for_ip"):
-            try:
-                mac = self.get_mac_for_ip(lip)
-            except Exception:
-                mac = None
-
-        out["local_mac"] = normalize_mac(mac)
-        out["vendor"] = vendor_for_mac(out["local_mac"])
-        return out
-
-    def get_active_rows_prepared(self, limit: int = 200) -> list[dict]:
-        rows = self.get_active_rows(limit=limit)
-        return [self.prepare_row_for_ui(r) for r in rows]
-
-    # --- [CORE|LOOP] run ------------------------------------
-    def run(self):
-        while not self.stop.is_set():
-            try:
-                self._refresh_arp()
-                cnt = len(self.ip2mac)
-                if self._last_ip2mac_count != cnt:
-                    print(f"[SNMP] ip2mac entries: {cnt}")
-                    self._last_ip2mac_count = cnt
-                self._update_connections()
-            except Exception:
-                pass
-            time.sleep(POLL_INTERVAL_SECONDS)
-
 # endregion AGGREGATION
 
 _dns_lock = threading.Lock()
@@ -1474,6 +1057,8 @@ class App(tk.Tk):
             value=bool(self.cfg.get("show_idle_devices", DEFAULT_SHOW_IDLE_DEVICES))
         )
 
+        self._init_vendor_icons()
+        
         self._build_ui()
         self._ui_ready = True 
         # Give Tk a beat to compute sizes, then place sashes
@@ -1600,6 +1185,24 @@ class App(tk.Tk):
             _TOASTER = None
         
         # (If you later have sash / details-panel placement, it can also live here)
+
+    def _init_vendor_icons(self):
+        """
+        Create 40x40 transparent icons with centered 28px squares representing vendor states.
+        Stored as self.icon_labelled, self.icon_known, self.icon_unknown.
+        """
+        from PIL import Image, ImageDraw, ImageTk
+
+        def make_icon(hex_color: str, inner: int = 28, size: int = 40):
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            margin = (size - inner) // 2
+            draw.rectangle([margin, margin, margin + inner, margin + inner], fill=hex_color)
+            return ImageTk.PhotoImage(img)
+
+        self.icon_labelled = make_icon(COLOR_VENDOR_LABELLED)
+        self.icon_known    = make_icon(COLOR_VENDOR_KNOWN)
+        self.icon_unknown  = make_icon(COLOR_VENDOR_UNKNOWN)
 
     # --- [UI|SEARCH] _apply_alert_filter ------------------------------------
     def _apply_alert_filter(self, *_):
@@ -2365,6 +1968,71 @@ class App(tk.Tk):
         ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="right", padx=(4, 0))
         ttk.Button(btns, text="OK", command=on_ok).pack(side="right")
 
+    # --- [UI|MENU] _update_vendor_menu_state ------------------------------------
+    def _update_vendor_menu_state(self) -> None:
+        """
+        Enable/disable Vendor Enrichment menu items based on current state:
+
+        - Export… is disabled if there are no overrides in the resolver
+        - Import… is disabled if the JSON file doesn't exist
+        """
+        vm = getattr(self, "vendor_menu", None)
+        if vm is None:
+            return
+
+        # 1) Export: only enabled if we have any aliases in the resolver
+        try:
+            has_overrides = bool(getattr(_VENDORS, "_alias", {}))
+        except Exception:
+            has_overrides = False
+
+        vm.entryconfig(
+            "Export Vendor Overrides…",
+            state="normal" if has_overrides else "disabled",
+        )
+
+        # 2) Import: only enabled if the JSON file exists
+        try:
+            exists = VENDOR_OVERRIDES_JSON.exists()
+        except Exception:
+            exists = False
+
+        vm.entryconfig(
+            "Import Vendor Overrides…",
+            state="normal" if exists else "disabled",
+        )
+
+    # --- [UI|MENU] _menu_export_vendor_overrides ------------------------------------
+    def _menu_export_vendor_overrides(self):
+        from tkinter import filedialog, messagebox
+        path = filedialog.asksaveasfilename(
+            title="Export Vendor Overrides to JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All Files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            count = export_vendor_enrichment(path)
+            messagebox.showinfo("Export complete", f"Exported {count} entries to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+
+    # --- [UI|MENU] _menu_import_vendor_overrides ------------------------------------
+    def _menu_import_vendor_overrides(self):
+        from tkinter import filedialog, messagebox
+        path = filedialog.askopenfilename(
+            title="Import Vendor Overrides from JSON",
+            filetypes=[("JSON files", "*.json"), ("All Files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            count = import_vendor_enrichment(path, prefer_existing=True)
+            messagebox.showinfo("Import complete", f"Merged {count} entries from:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+            
     # --- [UI|MENU] _build_menu ------------------------------------
     def _build_menu(self):
         """
@@ -2384,10 +2052,7 @@ class App(tk.Tk):
         
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_checkbutton(
-            label="Show idle devices (no traffic)",
-            variable=self.show_idle_var,
-            command=self._on_toggle_show_idle,
-        )
+            label="Show idle devices (no traffic)", variable=self.show_idle_var, command=self._on_toggle_show_idle,)
         
         menubar.add_cascade(label="View", menu=view_menu)
 
@@ -2413,8 +2078,17 @@ class App(tk.Tk):
 
         tools_menu.add_separator()
         tools_menu.add_command(label="Settings…", command=self._open_settings_dialog)
-        
         menubar.add_cascade(label="Tools", menu=tools_menu)
+
+        # -------- Vendor Enrichment Menu --------
+        self.vendor_menu = tk.Menu(menubar, tearoff=False)
+        self.vendor_menu.add_command(label="Export Vendor Overrides…", accelerator="Ctrl+E", command=self._menu_export_vendor_overrides,)
+        self.bind("<Control-e>", lambda *_: self._menu_export_vendor_overrides())
+        self.vendor_menu.add_command(label="Import Vendor Overrides…", command=self._menu_import_vendor_overrides,)
+        menubar.add_cascade(label="Vendor Enrichment", menu=self.vendor_menu)
+
+        # Initialise enabled/disabled state
+        self._update_vendor_menu_state()
 
         # Help
         help_menu = tk.Menu(menubar, tearoff=False)
@@ -2429,6 +2103,15 @@ class App(tk.Tk):
         tv["columns"] = cols_tuple
         tv["displaycolumns"] = cols_tuple
         tv["show"] = "headings"
+
+    # --- [UI] _vendor_quality_glyph ------------------------------------
+    def _vendor_quality_glyph(self, vendor: str | None) -> str:
+        v = (vendor or "").lower()
+        if not v or v == "unknown":
+            return "🟥"   # unknown
+        if "locally administered" in v or "randomized" in v or "laa" in v:
+            return "🟪"   # randomized/LAA
+        return "🟩"       # known vendor
 
     # --- [UI|BUILD] _build_ui --------------------------------------------------
     def _build_ui(self):
@@ -2462,7 +2145,10 @@ class App(tk.Tk):
             self.note = tk.StringVar(value="")
         if not hasattr(self, "status"):
             self.status = tk.StringVar(value="Ready")
-
+        
+        # Ensure status icon images exist
+        self._init_vendor_status_icons()
+        
         # ----- menubar (optional) -----
         if hasattr(self, "_build_menu"):
             try:
@@ -2471,6 +2157,7 @@ class App(tk.Tk):
                 pass
 
         # ===== shared widths so first 4 columns align across tables =====
+        COL_W_STATUS = 32
         COL_W_FIRST = 140
         COL_W_MAC   = 160
         COL_W_VEND  = 220
@@ -2479,11 +2166,17 @@ class App(tk.Tk):
         COL_W_LAST  = 140
         COL_W_BYTES = 110
 
+        # --- [UI|TABLES] _force_headings --------------------------------------------------
         def _force_headings(tv: ttk.Treeview, labels: dict[str, str]):
+            """Apply column IDs + headings WITHOUT overriding tv['show'].
+
+            Some tables use 'tree headings' now for a #0 status icon column, so
+            this helper must not force 'headings' only.
+            """
             cols = tuple(labels.keys())
             tv["columns"] = cols
             tv["displaycolumns"] = cols
-            tv["show"] = "headings"
+            # Do NOT touch tv['show'] here; caller decides.
             for cid, txt in labels.items():
                 tv.heading(cid, text=txt)
 
@@ -2501,48 +2194,16 @@ class App(tk.Tk):
         self.foot = foot
 
         # right cluster
-        ttk.Button(
-            foot,
-            text="Copy Alerts",
-            command=self._copy_alerts,
-        ).pack(side="right", padx=(8, 0))
-        ttk.Button(
-            foot,
-            text="Copy Active",
-            command=self._copy_active,
-        ).pack(side="right", padx=(8, 0))
-        ttk.Button(
-            foot,
-            text="Copy Aggregates",
-            command=self._copy_aggregates,
-        ).pack(side="right", padx=(8, 0))
-        ttk.Button(
-            foot,
-            text="Export Snapshot (CSV)",
-            command=self._export_snapshot,
-        ).pack(side="right", padx=(8, 0))
-        ttk.Button(
-            foot,
-            text="Manage Hostname Aliases",
-            command=self._on_manage_hostname_aliases,
-        ).pack(side="right", padx=(8, 0))
-        ttk.Button(
-            foot,
-            text="Set Hostname Alias (from selection)",
-            command=self._on_set_hostname_alias,
-        ).pack(side="right", padx=(8, 12))
+        ttk.Button(foot, text="Copy Alerts",                         command=self._copy_alerts,).pack(side="right", padx=(8, 0))
+        ttk.Button(foot, text="Copy Active",                         command=self._copy_active,).pack(side="right", padx=(8, 0))
+        ttk.Button(foot, text="Copy Aggregates",                     command=self._copy_aggregates,).pack(side="right", padx=(8, 0))
+        ttk.Button(foot, text="Export Snapshot (CSV)",               command=self._export_snapshot,).pack(side="right", padx=(8, 0))
+        ttk.Button(foot, text="Manage Hostname Aliases",             command=self._on_manage_hostname_aliases,).pack(side="right", padx=(8, 0))
+        ttk.Button(foot, text="Set Hostname Alias (from selection)", command=self._on_set_hostname_alias,).pack(side="right", padx=(8, 12))
 
         # left cluster (always visible)
-        ttk.Button(
-            foot,
-            text="Export unknown MAC addresses",
-            command=self._on_copy_unknown_vendors_menu,
-        ).pack(side="left")
-        ttk.Button(
-            foot,
-            text="Copy Debug Bundle",
-            command=self._copy_debug_bundle,
-        ).pack(side="left", padx=(8, 12))
+        ttk.Button(foot, text="Export unknown MAC addresses",        command=self._on_copy_unknown_vendors_menu,).pack(side="left")
+        ttk.Button(foot, text="Copy Debug Bundle",                   command=self._copy_debug_bundle,).pack(side="left", padx=(8, 12))
 
         # =========================================================================
         # === Statusbar (very bottom) =============================================
@@ -2650,8 +2311,12 @@ class App(tk.Tk):
             ttk.Label(parent, text=text).pack(side="left", padx=(0, 8))
 
         _legend_item(legend, NEW_DEVICE_BACKGROUND, "New device")
-        _legend_item(legend, UNKNOWN_VENDOR_BACKGROUND, "Unknown vendor")
+        _legend_item(legend, UNKNOWN_VENDOR_BACKGROUND, "Unknown / randomised")
         _legend_item(legend, HIGH_VOLUME_BACKGROUND, "High volume (≥ 1 MB)")
+        
+        # Glyph legend (for the little squares shown in Vendor/Host column)
+        glyph_label = tk.Label(legend, text="Glyphs:  🟩 Labelled  •  🟦 Known vendor  •  🟥 Unknown/randomised", font=("Segoe UI Emoji", 9), anchor="w",)
+        glyph_label.pack(side="left", padx=(4, 0))
         # ----end legand --------------------------------------------------------------
 
         # Alerts title now comes *below* the filter row
@@ -2678,10 +2343,22 @@ class App(tk.Tk):
         self.alerts = ttk.Treeview(
             alertf,
             columns=tuple(alerts_labels),
-            show="headings",
+            show="tree headings",   # show #0 (icon) + headings
             height=8,
         )
         _force_headings(self.alerts, alerts_labels)
+        
+        # #0 = tiny status icon column
+        self.alerts.column("#0", width=COL_W_STATUS, minwidth=COL_W_STATUS, stretch=False, anchor="w")
+        self.alerts.heading("#0", text="")
+
+        # NEW: clickable sorting for Alerts
+        self._setup_sorting(
+            self.alerts,
+            table_name="alerts",
+            default_col="time",
+            default_reverse=True,
+        )
 
         self.alerts.column("time",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
         self.alerts.column("mac",    width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
@@ -2744,24 +2421,30 @@ class App(tk.Tk):
             "last":   "Last Seen",
             "bytes":  "Bytes (TX)",
             "over1mb":">1MB?",
-            "state":  "State",  # hidden unless DEBUG
         }
+
+        # DEBUG-only column included only when debugging
+        if DEBUG:
+            active_labels["state"] = "State"
+
+        # Status icon lives in column #0, text columns in active_labels
         self.tree = ttk.Treeview(
             midf,
-            columns=tuple(active_labels),
-            show="headings",
-            height=14,
-        )
-        _force_headings(self.tree, active_labels)
-
-        self._setup_sorting(
-            self.tree,
-            table_name="active",
-            default_col="last",      # default sort by 'Last seen'
-            default_reverse=False,   # newest last
+            columns=list(active_labels.keys()),
+            show="tree headings",       # show #0 (icon) + headings
+            height=10,
+            selectmode="browse",
         )
 
-        # Lock first four to match Alerts
+        # #0 column = tiny status icon
+        self.tree.column("#0", width=COL_W_STATUS, minwidth=COL_W_STATUS, stretch=False, anchor="w")
+        self.tree.heading("#0", text="")
+
+        # Define headings for the named columns
+        for col, label in active_labels.items():
+            self.tree.heading(col, text=label, anchor="w")
+
+        # Column widths (same constants as before)
         self.tree.column("first",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
         self.tree.column("mac",     width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.tree.column("vendor",  width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
@@ -2770,8 +2453,11 @@ class App(tk.Tk):
         self.tree.column("last",    width=COL_W_LAST,  minwidth=COL_W_LAST,  stretch=False, anchor="w")
         self.tree.column("bytes",   width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
         self.tree.column("over1mb", width=70,          minwidth=70,          stretch=False, anchor="center")
-        self.tree.column("state",   width=110,         minwidth=80,          stretch=False, anchor="w")
 
+        if DEBUG:
+            self.tree.column("state", width=110, minwidth=80, stretch=False, anchor="w")
+
+        # Row tags
         self.tree.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
         self.tree.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
         self.tree.tag_configure("new_device",     background=NEW_DEVICE_BACKGROUND)
@@ -2780,10 +2466,18 @@ class App(tk.Tk):
 
         self._apply_saved_column_widths("active", self.tree)
 
+        self._setup_sorting(
+            self.tree,
+            table_name="active",
+            default_col="first",      # or "bytes" if you prefer
+            default_reverse=False,   # oldest first / newest last
+        )
+
+        # Scrollbar + geometry: PACK ONLY (no grid)
         scry2 = ttk.Scrollbar(midf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scry2.set)
         self.tree.pack(side="left", fill="both", expand=True, pady=8)
-        scry2.pack(side="left", fill="y", padx=(0, 4), pady=8)  # smaller gap
+        scry2.pack(side="left", fill="y", padx=(0, 4), pady=8)
 
         if hasattr(self, "_bind_edit_on_doubleclick"):
             self._bind_edit_on_doubleclick(
@@ -2800,6 +2494,7 @@ class App(tk.Tk):
             "<<TreeviewSelect>>",
             lambda e: self._update_details_from_tree(self.tree, "active"),
         )
+
 
         # =========================================================================
         # === Aggregates SECTION (bottom of left content) =========================
@@ -2829,18 +2524,13 @@ class App(tk.Tk):
         self.agg = ttk.Treeview(
             aggf,
             columns=tuple(agg_labels),
-            show="headings",
+            show="tree headings",   # show #0 (status icon) + headings
             height=8,
         )
         _force_headings(self.agg, agg_labels)
 
-        self._setup_sorting(
-            self.agg,
-            table_name="agg",
-            default_col="sightings",
-            default_reverse=True,
-        )
-
+        # #0 = tiny status icon column
+        self.agg.column("#0",        width=COL_W_STATUS, minwidth=COL_W_STATUS, stretch=False, anchor="w")
         self.agg.column("sightings", width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="e")
         self.agg.column("mac",       width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
         self.agg.column("vendor",    width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
@@ -2922,15 +2612,38 @@ class App(tk.Tk):
 
     # --- [UI] _apply_state_visibility ------------------------------------
     def _apply_state_visibility(self):
-        """Hide/show the 'state' column (last col in Active). Hidden unless DEBUG."""
-        show = bool(globals().get("DEBUG", False))
+        """
+        Hide/show the 'state' column (DEBUG-only in Active table).
+
+        - If DEBUG is False or the column doesn't exist, do nothing.
+        - If DEBUG is True and the 'state' column exists, make it visible.
+        """
+        tree = getattr(self, "tree", None)
+        if tree is None:
+            return
+
         col = "state"
-        if show:
-            self.tree.heading(col, text="State")
-            self.tree.column(col, width=110, minwidth=60, stretch=False, anchor="w")
+
+        # If the Treeview doesn't have a 'state' column, bail out cleanly.
+        cols = tree["columns"]
+        if isinstance(cols, (list, tuple)):
+            has_state = col in cols
         else:
-            self.tree.heading(col, text="")
-            self.tree.column(col, width=0, minwidth=0, stretch=False)
+            # Tk can return a space-separated string
+            has_state = col in str(cols).split()
+
+        if not has_state:
+            # In non-DEBUG builds, we never added the column; nothing to do.
+            return
+
+        show = bool(globals().get("DEBUG", False))
+
+        if show:
+            tree.heading(col, text="State")
+            tree.column(col, width=110, minwidth=60, stretch=False, anchor="w")
+        else:
+            tree.heading(col, text="")
+            tree.column(col, width=0, minwidth=0, stretch=False)
 
     # --- [UI|TREEVIEW] _bind_edit_on_doubleclick ------------------------------------
     def _bind_edit_on_doubleclick(self, tv, mac_col="mac", vendor_col="vendor", local_col=None):
@@ -3126,6 +2839,81 @@ class App(tk.Tk):
         d = getattr(self, "_mac_labels", None) or {}
         return d.get(mac.upper(), "")
 
+    # --- [UI|VENDOR STATUS ICONS] -----------------------------------------
+    def _init_vendor_status_icons(self) -> None:
+        """
+        Create small coloured squares for:
+          - 'Labelled'            (MAC has a hostname alias)
+          - 'Known vendor'        (OUI or vendor lookup succeeds)
+          - 'Unknown/randomised'  (no vendor match, or randomised MAC)
+
+        Uses tk.PhotoImage and stores them on self so they don't get GC'd.
+        Call this once from _build_ui before inserting any rows.
+        """
+        if hasattr(self, "_status_icons"):
+            return  # already initialised
+
+        size = STATUS_ICON_SIZE  # from global constant
+
+        def _square(color: str) -> tk.PhotoImage:
+            img = tk.PhotoImage(width=size, height=size)
+            img.put(color, to=(0, 0, size, size))  # fill solid
+            return img
+
+        # Colours come from global constants so you can tweak them in one place.
+        self._status_icons: dict[str, tk.PhotoImage] = {
+            "labelled": _square(COLOR_VENDOR_LABELLED),
+            "known":    _square(COLOR_VENDOR_KNOWN),
+            "unknown":  _square(COLOR_VENDOR_UNKNOWN),
+        }
+
+    # --- [UI|VENDOR STATUS] -----------------------------------------------
+    def _vendor_status_for_mac(self, mac: str | None) -> str:
+        """
+        Map MAC → one of: 'labelled', 'known', 'unknown'.
+
+        - labelled: MAC has a user label in mac_labels.json
+        - known:   no label, but vendor lookup != Unknown
+        - unknown: empty/zero/randomised/unknown vendor
+        """
+        from pathlib import Path  # just to avoid linter complaining if unused elsewhere
+
+        mac_norm = normalize_mac(mac or "")
+        if not mac_norm:
+            return "unknown"
+
+        # 1) User label?
+        try:
+            label = self._get_current_label_for_mac(mac_norm)
+            if label:
+                return "labelled"
+        except Exception:
+            pass
+
+        # 2) Vendor lookup via unified resolver
+        try:
+            vendor = vendor_for_mac(mac_norm)
+        except Exception:
+            vendor = ""
+
+        v = (vendor or "").strip().lower()
+        if v and v not in {"unknown", "locally administered (randomized)"}:
+            return "known"
+
+        return "unknown"
+
+    # --- [UI|VENDOR STATUS ICON LOOKUP] -----------------------------------
+    def _status_icon_for_mac(self, mac: str | None) -> tk.PhotoImage | None:
+        """
+        Return the tk.PhotoImage for the given MAC's vendor status.
+        Safe to call even before _init_vendor_status_icons (returns None).
+        """
+        icons = getattr(self, "_status_icons", None)
+        if not icons:
+            return None
+        key = self._vendor_status_for_mac(mac)
+        return icons.get(key)
+
     # --- [UI|DRAG DIVIDOR EVENT] _on_sash_drag ----------------------------------------------
     def _on_sash_drag(self, event=None):
         """
@@ -3310,6 +3098,68 @@ class App(tk.Tk):
         except Exception:
             print(str(msg))
 
+    # --- [UI|STATUS] _update_status_line ------------------------------------
+    def _update_status_line(self):
+        """
+        Build the status text for the bottom status bar, using the refactored
+        MonitorCore + collectors.
+
+        Shows something like:
+          SNMP: puresnmp | Active: 12 TCP: 10 ARP: 34 Flows: 8 | Flow: NetFlow v5 OK | SSH: OK
+        """
+
+        core = getattr(self, "core", None)
+        if core is None:
+            self._set_status("Core not running")
+            return
+
+        try:
+            # Basic counters from core
+            active = len(getattr(core, "conn_map", {}) or {})
+            last_counts = getattr(core, "last_counts", {}) or {}
+            arp   = last_counts.get("arp", 0)
+            tcp   = last_counts.get("tcp", 0)
+            flows = last_counts.get("flows", 0)
+
+            bits = []
+
+            # SNMP backend name (you already have get_snmp_backend_name())
+            bits.append(f"SNMP: {get_snmp_backend_name()}")
+
+            # Core counters
+            bits.append(f"Active: {active}  TCP: {tcp}  ARP: {arp}  Flows: {flows}")
+
+            # Flow backend: NetFlow or SSH conntrack
+            nf = getattr(core, "nf", None)
+
+            from collectors import NetflowV5Collector, ConntrackCollectorSSH  # safe local import
+
+            if isinstance(nf, NetflowV5Collector):
+                err = getattr(nf, "bind_error", None)
+                if err:
+                    bits.append("Flow: NetFlow ERROR")
+                else:
+                    bits.append("Flow: NetFlow v5 OK")
+            elif isinstance(nf, ConntrackCollectorSSH):
+                msg = nf.status_msg or "idle"
+                bits.append(f"Flow: conntrack ({msg})")
+            elif nf is None:
+                bits.append("Flow: off")
+
+            # SSH indicator – use the SSH collector if you keep a reference on App
+            ssh = getattr(self, "ssh_collector", None)
+            if ssh is not None:
+                ssh_msg = ssh.status_msg or "idle"
+                bits.append(f"SSH: {ssh_msg}")
+
+            # Finally push to the existing status mechanism (note_lbl / status_var)
+            self._set_status(" | ".join(bits))
+
+        except Exception as e:
+            # Don't let status failures kill the UI; just log in DEBUG mode.
+            if DEBUG:
+                print("[UI|STATUS] error building status line:", e)
+
     # --- [UI|TREEVIEW] _setup_sorting ------------------------------------
     def _setup_sorting(self, tree: "ttk.Treeview", table_name: str, default_col: str | None = None, default_reverse: bool = False):
         """
@@ -3410,8 +3260,8 @@ class App(tk.Tk):
             tree.move(iid, "", idx)
 
     # --- [DNS|HELPER] queue rDNS for an IP (no-dup, safe) ------------------------
-    # Optionally queue rDNS for aggregate destinations as well (keeps display consistent)
     def _queue_rdns(self, ip: str) -> None:
+        # Optionally queue rDNS for aggregate destinations as well (keeps display consistent)
         if not RESOLVE_RDNS or ip in ("0.0.0.0", "127.0.0.1"):
             return
         with _dns_lock:
@@ -3580,7 +3430,6 @@ class App(tk.Tk):
         except Exception:
             # don't crash UI if disk write fails
             pass
-
 
     # --- [UI|LIFECYCLE] _on_close ----------------------------------
     def _on_close(self):
@@ -3838,21 +3687,21 @@ class App(tk.Tk):
         self._set_status(f"rDNS {'ON' if RESOLVE_RDNS else 'OFF'}")
 
     # --- [UI|REFRESH] _refresh_ui ----------------------------------------------
-    # Purpose: Drain alerts; render tables; update status; queue rDNS
     def _refresh_ui(self):
         """
         Periodically refresh the table contents and status bar from the Core state.
-
+    
         - Rebuilds the Alerts, Active, and Aggregates Treeviews from core.conn_map
-        and other cached structures.
+          and other cached structures.
         - Reapplies row colour tags (unknown vendor, high volume, new device).
         - Updates the status bar metrics (active count, MAC count, flow/SSH state,
-        clock skew warning).
+          clock skew warning).
         - Reschedules itself using after() while the app is running.
         """
-        
+    
         import queue
-
+        import time
+        
         # --- [UI|NET] _fmt_dest ----------------------------------------------
         # --- formatter for IP[:port] with cached rDNS if present
         def _fmt_dest(remote_ip: str, remote_port):
@@ -3863,7 +3712,7 @@ class App(tk.Tk):
                 host = None
             return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
 
-        # --- [UI|HELPER] _tags_for_row(vendor_text ----------------------------------------------
+        # --- [UI|HELPER] _tags_for_row ---------------------------------------
         # --- helper: decide which tags to apply based on vendor / bytes / "newness"
         def _tags_for_row(vendor_text: str, bytes_val: int | float, *, is_new: bool = False) -> tuple[str, ...]:
             tags: list[str] = []
@@ -3882,29 +3731,33 @@ class App(tk.Tk):
                 tags.append("new_device")
 
             return tuple(tags)
-        
+
+        if DEBUG:
+            print("[DEBUG] UI sees conn_map size:", len(self.core.conn_map))
+            
         with self.core.data_lock:
-    
-            # ==============================================================
-            # === REFRESH.ALERTS -drain queue, insert rows, optional toast==
-            # ==============================================================
+
+        # ==============================================================
+        # === REFRESH.ALERTS (top) - drain queue, insert rows, toast ===
+        # ==============================================================
 
             try:
                 while True:
                     alert = self.core.alert_q.get_nowait()
-    
+
                     # compute a vendor/label for the local endpoint’s MAC/IP
                     local_hostport = alert.get("local", "")
                     local_ip = local_hostport.rsplit(":", 1)[0] if ":" in local_hostport else ""
-                    vendor_disp = self._display_name(local_ip, alert.get("mac"))
-    
+                    mac_norm = normalize_mac(alert.get("mac", "") or "")
+                    vendor_disp = self._display_name(local_ip, mac_norm)
+
                     # Destination: show "ip [hostname]:port" if hostname included on alert
                     remote_txt = alert.get("remote", "")
                     if alert.get("hostname"):
                         dest_text = f'{remote_txt} [{alert["hostname"]}]'
                     else:
                         dest_text = remote_txt
-    
+
                     bytes_val = int(alert.get("bytes", 0) or 0)
                     vendor_text = vendor_disp or ""
 
@@ -3913,7 +3766,11 @@ class App(tk.Tk):
 
                     tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
 
+                    # Status icon in #0
+                    status_img = self._status_icon_for_mac(mac_norm)
+
                     self.alerts.insert("", "end",
+                        image=status_img,   # first column (#0)
                         values=(
                             alert.get("time", ""),   # Time
                             alert.get("mac", ""),    # MAC
@@ -3925,12 +3782,12 @@ class App(tk.Tk):
                         ),
                         tags=tags,
                     )
-    
+
                     # Trim to last 500 alerts
                     if len(self.alerts.get_children()) > 500:
                         for iid in self.alerts.get_children()[:50]:
                             self.alerts.delete(iid)
-    
+
                     # Optional Windows toast
                     if _TOASTER:
                         try:
@@ -3940,13 +3797,14 @@ class App(tk.Tk):
                                 f'{alert.get("vendor","")} {alert.get("mac","")}\n'
                                 f'bytes={alert.get("bytes",0)}',
                                 threaded=True,
-                                duration=5
+                                duration=5,
                             )
                         except Exception:
                             pass
             except queue.Empty:
                 pass
-    
+
+
             # After alerts table rebuilt:
             try:
                 if hasattr(self, "alert_filter_var") and self.alert_filter_var.get():
@@ -3956,25 +3814,25 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-    
             # ==============================================================
             # === REFRESH.ACTIVE (middle) - CONNECTIONS ====================
             # ==============================================================
-            # rebuild whole table each tick (simple & safe)
 
             self.tree.delete(*self.tree.get_children())
-    
-            for key, rec in sorted(self.core.conn_map.items(),
-                                   key=lambda kv: kv[1]["last_seen"], reverse=True):
-    
+
+            for key, rec in sorted(
+                self.core.conn_map.items(),
+                key=lambda kv: kv[1]["last_seen"],
+                reverse=True,
+            ):
                 # pre-filters (LAN, valid remote, state)
-                if not _is_lan_client_ip(rec["local_ip"]):
+                if not monitor_core._is_lan_client_ip(rec["local_ip"]):
                     continue
                 if rec["remote_ip"] == "0.0.0.0":
                     continue
                 if str(rec.get("state", "")).lower() in {"listen", "timewait", "closing"}:
                     continue
-    
+
                 # rDNS queuing
                 remote_ip = rec["remote_ip"]
                 remote_port = rec["remote_port"]
@@ -3989,11 +3847,12 @@ class App(tk.Tk):
                             self._dns_q.put_nowait(remote_ip)
                         except queue.Full:
                             pass
-    
+
                 dest_text = _fmt_dest(remote_ip, remote_port)
                 local_hp = f'{rec["local_ip"]}:{rec["local_port"]}'
-                vendor_disp = self._display_name(rec.get("local_ip"), rec.get("local_mac"))
-    
+                mac_norm = normalize_mac(rec.get("local_mac") or "")
+                vendor_disp = self._display_name(rec.get("local_ip"), mac_norm)
+
                 bytes_val = int(rec.get("bytes_tx") or 0)
                 vendor_text = vendor_disp or ""
 
@@ -4001,6 +3860,7 @@ class App(tk.Tk):
                 is_new = rec.get("first_seen") == rec.get("last_seen")
 
                 tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
+                status_img = self._status_icon_for_mac(mac_norm)
 
                 row_vals = [
                     rec.get("first_seen", ""),               # First Seen
@@ -4015,33 +3875,43 @@ class App(tk.Tk):
                 if DEBUG:
                     row_vals.append(str(rec.get("state", "")).lower())
 
-                self.tree.insert("", "end", values=tuple(row_vals), tags=tags)
-    
+                self.tree.insert(
+                    "",
+                    "end",
+                    text="",           # no text in #0
+                    image=status_img,  # coloured square in #0
+                    values=tuple(row_vals),
+                    tags=tags,
+                )
+
             # ==============================================================
             # === REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS ==========
             # ==============================================================
 
             self.agg.delete(*self.agg.get_children())
-    
+
             # 1) MACs discovered via ARP (devices present on LAN)
             macs_from_arp = {m for m in self.core.ip2mac.values() if m and m != "00:00:00:00:00:00"}
-    
+
             # 2) MACs that we’ve accumulated traffic for
             macs_from_aggs = set(self.core.aggregates.keys())
-    
+
             # 3) Union = all devices we know about
             all_macs = macs_from_arp | macs_from_aggs
-    
+
             for mac in sorted(all_macs):
-                vendor = self._display_name(local_ip=None, mac=mac)
+                mac_norm = normalize_mac(mac)
+                vendor = self._display_name(ip=None, mac=mac_norm)
                 dests = self.core.aggregates.get(mac, {})
-    
+
                 if not dests:
                     # skip empty placeholders entirely
                     continue
-    
-                for (rip, rport), stats in sorted(dests.items(),
-                                                  key=lambda kv: (-int(kv[1].get("bytes", 0)), kv[0])):
+
+                for (rip, rport), stats in sorted(
+                    dests.items(),
+                    key=lambda kv: (-int(kv[1].get("bytes", 0)), kv[0]),
+                ):
                     # queue rDNS for aggregates as well
                     if RESOLVE_RDNS and rip not in ("0.0.0.0", "127.0.0.1"):
                         with _dns_lock:
@@ -4054,7 +3924,7 @@ class App(tk.Tk):
                                 self._dns_q.put_nowait(rip)
                             except queue.Full:
                                 pass
-    
+
                     # same destination formatter: IP [host]:port if cached
                     try:
                         with _dns_lock:
@@ -4062,7 +3932,7 @@ class App(tk.Tk):
                     except Exception:
                         host = None
                     agg_dest = f"{rip} [{host}]:{rport}" if host else f"{rip}:{rport}"
-    
+
                     sightings = int(stats.get("sightings") or 0)
                     bytes_val = int(stats.get("bytes") or 0)
                     vendor_text = vendor or ""
@@ -4071,45 +3941,53 @@ class App(tk.Tk):
                     is_new = sightings <= 2
 
                     tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
+                    status_img = self._status_icon_for_mac(mac_norm)
 
-                    self.agg.insert("", "end",
+                    self.agg.insert(
+                        "",
+                        "end",
+                        text="",
+                        image=status_img,
                         values=(
                             sightings,     # Sightings
-                            mac,           # MAC
+                            mac_norm,      # MAC (normalized)
                             vendor_text,   # Vendor/Host
                             agg_dest,      # Destination
                             bytes_val,     # Total Bytes
                         ),
                         tags=tags,
                     )
-              
-                    # Re-apply any remembered sort on all tables
+
+        # Re-apply any remembered sort on all tables
         try:
             self._reapply_sort_if_any("alerts", self.alerts)
             self._reapply_sort_if_any("active", self.tree)
             self._reapply_sort_if_any("agg", self.agg)
         except Exception:
             pass
-        
-            # ---------------- status line (top-right) + ssh status echo -------------
-            nf_status = "OFF"
-            if self.nf:
-                if isinstance(self.nf, ConntrackCollectorSSH):
-                    nf_status = f"Conntrack over SSH: {self.nf.status_msg or '…'}"
-                else:
-                    bind_err = getattr(self.nf, "bind_error", None)
-                    nf_status = (f"NetFlow v5 {NETFLOW_LISTEN_IP}:{NETFLOW_LISTEN_PORT}"
-                                 if not bind_err else f"NetFlow ERROR: {bind_err}")
-    
-            if isinstance(self.nf, ConntrackCollectorSSH):
-                ssh_status = self.nf.status_msg or "…"
-                if ssh_status != getattr(self, "_last_ssh_status", None):
-                    print(f"[SSH] {ssh_status}")
-                    self._last_ssh_status = ssh_status
-    
-            snmp_label = get_snmp_backend_name()
-            counts = getattr(self.core, "last_counts", {"arp": 0, "tcp": 0, "flows": 0})
 
+        # ---------------- status line (top-right) + ssh status echo -------------
+        nf_status = "OFF"
+        if self.nf:
+            if isinstance(self.nf, ConntrackCollectorSSH):
+                nf_status = f"Conntrack over SSH: {self.nf.status_msg or '…'}"
+            else:
+                bind_err = getattr(self.nf, "bind_error", None)
+                nf_status = (
+                    f"NetFlow v5 {NETFLOW_LISTEN_IP}:{NETFLOW_LISTEN_PORT}"
+                    if not bind_err
+                    else f"NetFlow ERROR: {bind_err}"
+                )
+    
+        if isinstance(self.nf, ConntrackCollectorSSH):
+            ssh_status = self.nf.status_msg or "…"
+            if ssh_status != getattr(self, "_last_ssh_status", None):
+                print(f"[SSH] {ssh_status}")
+                self._last_ssh_status = ssh_status
+    
+        snmp_label = get_snmp_backend_name()
+        counts = getattr(self.core, "last_counts", {"arp": 0, "tcp": 0, "flows": 0})
+    
         # --- Status bar metrics -----------------------------------
         try:
             # 1) Active connections + unique MACs
@@ -4118,15 +3996,15 @@ class App(tk.Tk):
                 rows = active_rows(limit=COPY_LIMIT_ROWS)
             else:
                 rows = list(getattr(self.core, "conn_map", {}).values())
-
+    
             active_count = len(rows)
             macs = {normalize_mac(r.get("local_mac") or r.get("mac") or "") for r in rows}
             macs.discard("")  # remove empties
             unique_macs = len(macs)
-
+    
             if hasattr(self, "status_conn"):
                 self.status_conn.set(f"Active: {active_count} | MACs: {unique_macs}")
-
+    
             # 2) Flow collector state
             flow_label = "Flow: off"
             core = getattr(self, "core", None)
@@ -4138,10 +4016,10 @@ class App(tk.Tk):
                         flow_label = f"Flow: on ({flows} flows)"
                 except Exception:
                     pass
-
+    
             if hasattr(self, "status_flow"):
                 self.status_flow.set(flow_label)
-
+    
             # 3) SSH collector state
             ssh_label = "SSH: off"
             try:
@@ -4150,35 +4028,44 @@ class App(tk.Tk):
                     ssh_label = "SSH: on"
             except Exception:
                 pass
-
+    
             if hasattr(self, "status_ssh"):
                 self.status_ssh.set(ssh_label)
-
+    
             # 4) Clock / timestamp warning (simple initial version)
             clock_label = "Clock: ok"
             try:
                 # rough heuristic: last alert/last_seen older than N seconds?
                 # you can refine this later with real router vs local time diff.
-                now = time.time()
+                now_ts = time.time()
                 # If you have rows with 'last_seen' as epoch seconds:
                 lag = None
                 for r in rows:
                     ts = r.get("last_seen") or r.get("first_seen")
                     if isinstance(ts, (int, float)):
-                        dt = now - ts
+                        dt = now_ts - ts
                         if dt >= 0:
                             lag = dt if lag is None else min(lag, dt)
                 if lag is not None and lag > 120:
                     clock_label = f"Clock: {int(lag)}s behind?"
             except Exception:
                 pass
-
+    
             if hasattr(self, "status_clock"):
                 self.status_clock.set(clock_label)
-
+    
         except Exception:
             # don't let status bar updates kill the UI
             pass
+
+        # --- Status bar update (non-fatal) ---
+        try:
+            self._update_status_line()
+        except Exception:
+            if DEBUG:
+                import traceback
+                print("[UI|STATUS] exception:")
+                traceback.print_exc()
 
         # finally, reschedule next refresh
         if getattr(self, "_ui_ready", False):
@@ -4495,39 +4382,78 @@ class App(tk.Tk):
         self._copy_to_clipboard("\n".join(parts), "Debug bundle copied")
 
     # --- [UI|DEVICE NAME] _display_name ------------------------------------
-    def _display_name(self, local_ip: str | None, mac: str | None) -> str:
-        """Human-friendly name for a device, used in Vendor/Host columns.
-    
-        Priority:
-          1) Hostname alias for the IP (host_aliases.json)
-          2) Custom device label for the MAC
-          3) Vendor name for the MAC
-          4) "Unknown"
+    def _display_name(self, ip: str | None, mac: str | None, vendor: str | None = None) -> str:
         """
-        # 1) IP alias (from host_aliases.json via _HOSTNAMES)
+        Unified friendly name builder.
+
+        Rules:
+        - If user-defined label exists → show:   Label (Vendor)
+        - If no label but vendor known → show:   Vendor
+        - If randomized MAC → show:              Randomized
+        - If unknown →                           Unknown
+        """
+
+        mac = (mac or "").strip().upper()
+        vendor = (vendor or "").strip()
+
+        # 1) Try get label
+        label = ""
         try:
-            # prefer alias/rDNS for the LAN device (local_ip)
-            if local_ip:
-                host = _HOSTNAMES.name_for_ip(local_ip)
-                if host:
-                    return host
+            if hasattr(self, "_get_current_label_for_mac"):
+                label = self._get_current_label_for_mac(mac) or ""
         except Exception:
             pass
-    
-        # 2) Custom MAC label
-        try:
-            if mac and hasattr(self, "_get_current_label_for_mac"):
-                lbl = self._get_current_label_for_mac(mac)
-                if lbl:
-                    return lbl
-        except Exception:
-            pass
-    
-        # 3) Fallback: vendor
-        try:
-            return vendor_for_mac(mac) if mac else "Unknown"
-        except Exception:
-            return "Unknown"
+
+        # 2) Vendor fallback / resolution
+        if not vendor:
+            try:
+                vendor = vendor_for_mac(mac) or ""
+            except Exception:
+                vendor = ""
+
+        v_lower = vendor.lower()
+
+        # 3) Handle randomized MAC case
+        if "locally administered" in v_lower or "randomized" in v_lower:
+            if label:
+                return f"{label} (Random)"
+            return "Random"
+
+        # 4) If label exists, include vendor if available
+        if label:
+            if vendor and vendor != "Unknown":
+                return f"{label} ({vendor})"
+            return label
+
+        # 5) Vendor but no label
+        if vendor and vendor != "Unknown":
+            return vendor
+
+        # 6) Fallback
+        return "Unknown"
+
+    # --- [UI|VENDOR] _vendor_status_glyph ------------------------------------
+    def _vendor_status_glyph(self, vendor_text: str, *, is_override: bool = False):
+        """
+        Returns both:
+        - glyph_image → used by Treeview's `image=` argument
+        - glyph_key → symbolic text stored in `values` for sort/export ("L", "K", "U")
+
+        vendor_text: raw string
+        is_override: True if user-assigned label
+        """
+        v = (vendor_text or "").strip().lower()
+
+        # Manual label overrides win
+        if is_override:
+            return self.icon_labelled, "L"
+
+        # Known vendor match
+        if v and v not in ("unknown", "locally administered (randomized)"):
+            return self.icon_known, "K"
+
+        # Unknown
+        return self.icon_unknown, "U"
 
     # --- [UI|DEBUG] _dump_neighbors_csv ------------------------------------
     def _dump_neighbors_csv(self):
@@ -4915,21 +4841,41 @@ def _is_locally_admin(mac: str) -> bool:
 class _VendorResolver:
     
     # --- [INIT] __init__ --------------------------------------
-    def __init__(self, files: Iterable[Path] = ()):
+    def __init__(self, files: Iterable[Path] = (), json_path: Path | None = None):
+        """
+        Vendor resolver that can:
+          - Load base OUI → vendor map from text files (mac-vendor.txt, etc.)
+          - Apply user overrides (full MAC or OUI) from JSON
+          - Track unknown OUIs for later enrichment
+
+        Parameters
+        ----------
+        files : Iterable[Path]
+            Optional explicit list of vendor DB text files.
+        json_path : Path | None
+            Optional path to JSON overrides file. Defaults to VENDOR_OVERRIDES_JSON.
+        """
         self._map: Dict[str, str] = {}
         self._alias: Dict[str, str] = {}      # full MAC (17 chars) or OUI → vendor
         self._miss_cache: set[str] = set()
         self._unknown_ouis: Dict[str, int] = {}
         self._loaded_from: list[Path] = []
+        
+        # Where we persist/load JSON overrides
+        self._json_path: Path = Path(json_path) if json_path is not None else VENDOR_OVERRIDES_JSON
         self.reload(files)
 
     # --- [] reload --------------------------------------
-    def reload(self, files: Iterable[Path] = ()):
+    def reload(self, files: Iterable[Path] = ()) -> None:
+        """
+        Reload base vendor DB from text files and then reapply JSON overrides.
+        """
         self._map.clear()
         self._alias.clear()
         self._miss_cache.clear()
         self._unknown_ouis.clear()
         self._loaded_from = []
+
         candidates = list(files) if files else _candidate_vendor_files()
         for p in candidates:
             try:
@@ -4940,7 +4886,191 @@ class _VendorResolver:
                         self._map.update(m)
                         self._loaded_from.append(p)
             except Exception:
+                # stay resilient if any vendor DB file is broken
                 pass
+
+        # Finally, layer JSON overrides on top of the base map
+        self._load_json_overrides()
+
+    # ---------- JSON persistence for enrichment -----------
+
+    # --- [] _load_json_overrides --------------------------
+    def _load_json_overrides(self) -> None:
+        """
+        Merge overrides from the JSON file into self._alias.
+
+        JSON format (preferred):
+
+            {
+              "by_oui": {
+                "AA:BB:CC": "Vendor Name",
+                ...
+              },
+              "by_mac": {
+                "AA:BB:CC:DD:EE:FF": "Vendor Name",
+                ...
+              }
+            }
+
+        Backwards compat: a flat { key: vendor } dict also works.
+        """
+        path = getattr(self, "_json_path", None) or VENDOR_OVERRIDES_JSON
+        path = Path(path)
+
+        if not path.exists():
+            return
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                obj = json.load(f)
+        except Exception:
+            # ignore malformed JSON; user can fix the file
+            return
+
+        if isinstance(obj, dict) and ("by_oui" in obj or "by_mac" in obj):
+            items = []
+            items.extend((obj.get("by_oui") or {}).items())
+            items.extend((obj.get("by_mac") or {}).items())
+        elif isinstance(obj, dict):
+            # flat mapping
+            items = obj.items()
+        else:
+            return
+
+        for key, vendor in items:
+            if not isinstance(key, str):
+                continue
+            if vendor is None:
+                continue
+            vendor_str = str(vendor).strip()
+            if not vendor_str:
+                continue
+            # Reuse existing normalisation logic
+            self.add_vendor_alias(key, vendor_str)
+
+    # --- [] _save_json_overrides --------------------------
+    def _save_json_overrides(self, path: Path | None = None) -> int:
+        """
+        Persist current alias map (OUI/full-MAC → vendor) to JSON.
+
+        Returns
+        -------
+        int
+            Number of aliases written.
+        """
+        path = Path(path or getattr(self, "_json_path", None) or VENDOR_OVERRIDES_JSON)
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        by_oui: dict[str, str] = {}
+        by_mac: dict[str, str] = {}
+
+        for key, vendor in sorted(self._alias.items()):
+            if not vendor:
+                continue
+            v = str(vendor).strip()
+            if not v:
+                continue
+            k = key.upper()
+            if len(k) == 17:       # AA:BB:CC:DD:EE:FF
+                by_mac[k] = v
+            elif len(k) == 8:      # AA:BB:CC
+                by_oui[k] = v
+
+        payload = {"by_oui": by_oui, "by_mac": by_mac}
+        try:
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+        except Exception:
+            return 0
+
+        return len(by_oui) + len(by_mac)
+
+    # ---------- Public JSON enrichment API ----------
+
+    # --- [] export_enrichment_json --------------------------
+    def export_enrichment_json(self, path: Path | None = None) -> int:
+        """
+        Export current overrides (OUI/full-MAC → vendor) to JSON.
+        If `path` is None, uses the default VENDOR_OVERRIDES_JSON.
+        Returns
+        -------
+        int
+            Number of entries written.
+        """
+        return self._save_json_overrides(path)
+
+    # --- [] import_enrichment_json --------------------------
+    def import_enrichment_json(self, path: Path | None = None, *, prefer_existing: bool = True,) -> int:
+        """
+        Import overrides from a JSON file and merge into the in-memory map.
+        Parameters
+        ----------
+        path : Path | None
+            JSON file to import from. Defaults to VENDOR_OVERRIDES_JSON.
+        prefer_existing : bool, default True
+            If True, keep existing aliases and only fill gaps.
+            If False, imported values overwrite existing ones.
+
+        Returns
+        -------
+        int
+            Number of aliases added or changed.
+        """
+        path = Path(path or getattr(self, "_json_path", None) or VENDOR_OVERRIDES_JSON)
+        if not path.exists():
+            return 0
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                obj = json.load(f)
+        except Exception:
+            return 0
+
+        if isinstance(obj, dict) and ("by_oui" in obj or "by_mac" in obj):
+            items = []
+            items.extend((obj.get("by_oui") or {}).items())
+            items.extend((obj.get("by_mac") or {}).items())
+        elif isinstance(obj, dict):
+            items = obj.items()
+        else:
+            return 0
+
+        changed = 0
+        for key, vendor in items:
+            if not isinstance(key, str):
+                continue
+            if vendor is None:
+                continue
+            vendor_str = str(vendor).strip()
+            if not vendor_str:
+                continue
+
+            # Normalise key to either full MAC or OUI
+            mac_norm = _normalize_mac(key)
+            if len(mac_norm) == 17:
+                k = mac_norm
+            else:
+                k = _normalize_oui_text(key)
+            if not k:
+                continue
+
+            old = self._alias.get(k)
+            if old == vendor_str:
+                continue
+            if prefer_existing and old:
+                # keep existing value
+                continue
+
+            self._alias[k] = vendor_str
+            changed += 1
+
+        # Persist merged view back to JSON
+        self._save_json_overrides(path)
+        return changed
 
     # --- [] add_vendor_alias --------------------------------------
     def add_vendor_alias(self, key: str, vendor: str):
@@ -4954,6 +5084,52 @@ class _VendorResolver:
         oui = _normalize_oui_text(key)
         if oui:
             self._alias[oui] = vendor
+
+    # --- [] vendor_for_mac --------------------------------------
+    def vendor_for_mac(self, mac: str | None) -> str:
+        """
+        Resolve a MAC to a vendor name using the in-memory maps.
+
+        Order:
+          1) full MAC alias (override)
+          2) full MAC base map
+          3) OUI alias (override)
+          4) OUI base map
+          5) record unknown OUI and return "Unknown"
+        """
+        mac_norm = _norm_mac(mac or "")
+        if not mac_norm:
+            return "Unknown"
+
+        full = mac_norm.upper()
+
+        # 1) full-MAC alias
+        alias = self._alias.get(full)
+        if alias:
+            return alias
+
+        # 2) full-MAC base map
+        base = self._map.get(full)
+        if base:
+            return base
+
+        # 3–4) OUI-level lookup
+        oui = _mac_oui(mac_norm)
+        if oui:
+            # OUI alias override
+            alias = self._alias.get(oui)
+            if alias:
+                return alias
+
+            # OUI in base map
+            base = self._map.get(oui)
+            if base:
+                return base
+
+            # 5) track unknown OUIs for enrichment/export
+            self._unknown_ouis[oui] = self._unknown_ouis.get(oui, 0) + 1
+
+        return "Unknown"
 
     # --- [] export_unknowns --------------------------------------
     def export_unknowns(self, path: Optional[Path] = None):
@@ -5026,56 +5202,6 @@ class _VendorResolver:
         except Exception:
             return False
 
-    # --- [] vendor_for_mac --------------------------------------
-    def vendor_for_mac(self, mac: str | None) -> str:
-        """Best-effort vendor resolution with explicit handling for randomized MACs."""
-        if not mac:
-            return "Unknown"
-
-        mac_full = _normalize_mac(mac)
-        if not mac_full:
-            return "Unknown"
-    
-        oui = _mac_oui(mac_full)  # e.g. 'AA:BB:CC' compute OUI from normalized full
-
-        # 0) exact alias (full MAC) — user override wins
-        if mac_full in self._alias:
-            return (self._alias[mac_full] or "Unknown").strip()
-
-        # 1) randomized MACs — label explicitly and stop (don’t pollute unknowns)
-        if self._is_locally_admin_from_full(mac_full):   # <-- note self.
-            return "Locally Administered (Randomized)"
-    
-        # 2) alias by OUI
-        if oui and oui in self._alias:
-            val = self._alias[oui]
-            if val and val.strip() and val.strip() != "Unknown":
-                return val.strip()
-
-        # 3) main offline map by OUI
-        if oui and oui in self._map:
-            val = self._map[oui]
-            if val and val.strip() and val.strip() != "Unknown":
-                return val.strip()
-
-        # 4) manuf fallback (package DB)
-        if _MANUF and mac_full:
-            try:
-                v = _MANUF.get_manuf_long(mac_full) or _MANUF.get_manuf(mac_full)
-                if v and v.strip() and v.strip() != "Unknown":
-                    return v.strip()
-            except Exception:
-                pass
-
-        # 5) track unknown OUIs (non-randomized only), with a tiny miss cache
-        if oui:
-            self._unknown_ouis[oui] = self._unknown_ouis.get(oui, 0) + 1
-            if oui in self._miss_cache:
-                return "Unknown"
-            self._miss_cache.add(oui)
-
-        return "Unknown"
-
 _HOSTNAMES = _HostnameResolver(HOST_ALIAS_PATH)
 _HOSTNAMES
 
@@ -5091,6 +5217,26 @@ _HOSTNAMES
 # Single shared resolver instance
 _VENDORS = _VendorResolver()
 
+def export_vendor_enrichment(path: str | Path | None = None) -> int:
+    """
+    Export vendor overrides (OUI/full-MAC → vendor) to JSON.
+
+    If `path` is None, uses VENDOR_OVERRIDES_JSON.
+    Returns the number of entries written.
+    """
+    p = Path(path) if path is not None else None
+    return _VENDORS.export_enrichment_json(p)
+
+def import_vendor_enrichment(path: str | Path | None = None, *, prefer_existing: bool = True,) -> int:
+    """
+    Import vendor overrides from JSON and merge into the resolver.
+
+    If `path` is None, uses VENDOR_OVERRIDES_JSON.
+    Returns the number of aliases added/changed.
+    """
+    p = Path(path) if path is not None else None
+    return _VENDORS.import_enrichment_json(p, prefer_existing=prefer_existing)
+
 # --- [] vendor_for_mac --------------------------------------
 def vendor_for_mac(mac: str | None) -> str:
     """
@@ -5102,6 +5248,8 @@ def vendor_for_mac(mac: str | None) -> str:
       3) Fallback: Unknown, with special handling for randomized MACs
     """
     return _VENDORS.vendor_for_mac(mac or "")
+# Let monitor_core use the same vendor resolver
+monitor_core.vendor_for_mac = vendor_for_mac
 
 # =============================================================================
 # SECTION: ENTRY POINT (main guard)

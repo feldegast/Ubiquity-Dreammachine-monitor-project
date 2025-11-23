@@ -8,7 +8,6 @@
       "local": 160,
       "mac": 160,
       "over1mb": 70,
-      "state": 0,
       "vendor": 220
     },
     "agg": {
@@ -23,7 +22,7 @@
       "dest": 420,
       "local": 160,
       "mac": 160,
-      "note": 213,
+      "note": 120,
       "time": 140,
       "vendor": 220
     }
@@ -38,6 +37,6 @@
   "resolve_rdns": true,
   "router_ip": "192.168.1.1",
   "show_idle_devices": false,
-  "window_geometry": "1748x964+86+0",
-  "window_state": "normal"
+  "window_geometry": "1536x773+1934+489",
+  "window_state": "zoomed"
 }

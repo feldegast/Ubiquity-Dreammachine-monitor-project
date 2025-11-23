@@ -9,6 +9,7 @@ from collections import defaultdict
 # NetFlow v5 packet format reference
 NFV5_HEADER_FMT = "!HHIIIIBBH"   # version(2), count(2), sys_uptime(4), unix_secs(4), unix_nsecs(4), flow_seq(4), engine_type(1), engine_id(1), sampling(2)
 NFV5_RECORD_FMT = "!IIIHHIIIIHHBBBBHHBBH"  # 48 bytes per record
+DEBUG = False
 
 # --- [UTIL|FORMAT] ip_to_str ------------------------------------
 def ip_to_str(ip_int: int) -> str:
@@ -163,6 +164,10 @@ class ConntrackCollectorSSH(threading.Thread):
         # 1) Try normal auth (password/publickey)
         cli = paramiko.SSHClient()
         cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        if DEBUG:
+            print(f"[SSH DEBUG] trying {self.host}:{self.port} as user={user!r}")
+        
         try:
             cli.connect(
                 self.host,
@@ -223,6 +228,8 @@ class ConntrackCollectorSSH(threading.Thread):
                     return
             except Exception as e:
                 errors.append(f"{which}: {e}")
+                if DEBUG:
+                    print(f"[SSH DEBUG] error during connect: {errors}")
 
         if errors:
             raise RuntimeError("SSH connect failed — " + " ; ".join(errors))
