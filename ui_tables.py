@@ -119,6 +119,7 @@ def build_alerts_section(app, parent: "tk.Frame") -> None:
         COLOR_VENDOR_LABELLED,
         COLOR_VENDOR_KNOWN,
         COLOR_VENDOR_UNKNOWN,
+        COLOR_VENDOR_LAA,
     )
     
     '''
@@ -137,8 +138,9 @@ def build_alerts_section(app, parent: "tk.Frame") -> None:
 
     # Status icon legend (same style as row highlights)
     _legend_item(legend, COLOR_VENDOR_LABELLED, "Labelled host")
-    _legend_item(legend, COLOR_VENDOR_KNOWN , "Known vendor")
-    _legend_item(legend, COLOR_VENDOR_UNKNOWN, "Unknown / randomised")
+    _legend_item(legend, COLOR_VENDOR_KNOWN,    "Known vendor")
+    _legend_item(legend, COLOR_VENDOR_LAA,      "Randomized / LAA")
+    _legend_item(legend, COLOR_VENDOR_UNKNOWN,  "Unknown vendor")
     
 
 

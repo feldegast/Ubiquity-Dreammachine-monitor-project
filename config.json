@@ -2,28 +2,28 @@
   "column_widths": {
     "active": {
       "bytes": 110,
-      "dest": 302,
-      "first": 105,
+      "dest": 420,
+      "first": 20,
       "last": 140,
-      "local": 139,
-      "mac": 87,
+      "local": 160,
+      "mac": 160,
       "over1mb": 70,
-      "vendor": 207
+      "vendor": 220
     },
     "agg": {
       "bytes": 110,
-      "dest": 622,
+      "dest": 707,
       "mac": 87,
-      "sightings": 105,
+      "sightings": 20,
       "vendor": 207
     },
     "alerts": {
       "bytes": 122,
-      "dest": 361,
+      "dest": 425,
       "local": 139,
       "mac": 87,
       "note": 139,
-      "time": 105,
+      "time": 20,
       "vendor": 207
     }
   },

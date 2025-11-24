@@ -51,6 +51,7 @@ from ui_theme import (
     COLOR_VENDOR_LABELLED,
     COLOR_VENDOR_KNOWN,
     COLOR_VENDOR_UNKNOWN,
+    COLOR_VENDOR_LAA,# locally-administered / randomized (LAA
 )
 
 from collections import defaultdict
@@ -2733,41 +2734,56 @@ class App(tk.Tk):
         d = getattr(self, "_mac_labels", None) or {}
         return d.get(mac.upper(), "")
 
-    # --- [UI|VENDOR STATUS ICONS] -----------------------------------------
+    # --- [UI|VENDOR STATUS ICONS] ---------------------------------------
     def _init_vendor_status_icons(self) -> None:
         """
-        Create small coloured squares for 'Labelled', 'Known vendor', 'Unknown/randomised'.
+        Build small in-memory square icons for vendor status:
 
-        Uses tk.PhotoImage and stores them on self so they don't get GC'd.
-        Call this once from _build_ui before inserting any rows.
+        - 'labelled' : custom device label (green)
+        - 'known'    : known vendor (blue)
+        - 'laa'      : locally-administered / randomized MAC (purple)
+        - 'unknown'  : everything else (red)
         """
-        if hasattr(self, "_status_icons"):
-            return
+        import tkinter as tk
+        from ui_theme import (
+            STATUS_ICON_SIZE,
+            COLOR_VENDOR_LABELLED,
+            COLOR_VENDOR_KNOWN,
+            COLOR_VENDOR_LAA,
+            COLOR_VENDOR_UNKNOWN,
+        )
 
-        size = STATUS_ICON_SIZE  # <- from global constant
+        if getattr(self, "_status_icons", None):
+            return  # already created
+
+        size = STATUS_ICON_SIZE
 
         def _square(color: str) -> tk.PhotoImage:
             img = tk.PhotoImage(width=size, height=size)
-            img.put(color, to=(0, 0, size, size))  # fill solid
+            img.put(color, to=(0, 0, size, size))
             return img
 
-        # Colours now come from global constants
         self._status_icons: dict[str, tk.PhotoImage] = {
             "labelled": _square(COLOR_VENDOR_LABELLED),
             "known":    _square(COLOR_VENDOR_KNOWN),
+            "laa":      _square(COLOR_VENDOR_LAA),
             "unknown":  _square(COLOR_VENDOR_UNKNOWN),
         }
+
 
     # --- [UI|VENDOR STATUS] -----------------------------------------------
     def _vendor_status_for_mac(self, mac: str | None) -> str:
         """
-        Map MAC → one of: 'labelled', 'known', 'unknown'.
+        Map MAC → one of: 'labelled', 'known', 'laa', 'unknown'.
 
-        - labelled: MAC has a user label in mac_labels.json
-        - known:   no label, but vendor lookup != Unknown
-        - unknown: empty/zero/randomised/unknown vendor
+        - labelled : MAC has a user label in mac_labels.json
+        - laa      : locally-administered / randomized MAC address
+        - known    : no label/LAA, but vendor lookup != Unknown
+        - unknown  : empty/zero/randomised/unknown vendor
         """
-        from pathlib import Path  # just to avoid linter complaining if unused elsewhere
+        from vendor_resolver import vendor_for_mac, _is_locally_admin
+        # (Path import kept only so linters don't whinge if used elsewhere)
+        from pathlib import Path  # noqa: F401
 
         mac_norm = normalize_mac(mac or "")
         if not mac_norm:
@@ -2775,23 +2791,40 @@ class App(tk.Tk):
 
         # 1) User label?
         try:
-            label = self._get_current_label_for_mac(mac_norm)
-            if label:
+            self._ensure_mac_labels_loaded()
+            labels = getattr(self, "_mac_labels", {}) or {}
+            if labels.get(mac_norm):
                 return "labelled"
         except Exception:
+            # If anything goes wrong, fall back to other heuristics
             pass
 
-        # 2) Vendor lookup via unified resolver
+        # 2) Locally-administered / randomized?
+        #    This checks the "locally administered" bit of the MAC.
+        try:
+            if _is_locally_admin(mac_norm):
+                return "laa"
+        except Exception:
+            # Don't let resolver issues kill the UI
+            pass
+
+        # 3) Vendor lookup via unified resolver
         try:
             vendor = vendor_for_mac(mac_norm)
         except Exception:
             vendor = ""
 
         v = (vendor or "").strip().lower()
+
+        # Some resolvers might encode this in the text too – just in case.
+        if "locally administered" in v or "randomized" in v or " laa" in v:
+            return "laa"
+
         if v and v not in {"unknown", "locally administered (randomized)"}:
             return "known"
 
         return "unknown"
+
 
     # --- [UI|VENDOR STATUS ICON LOOKUP] -----------------------------------
     def _status_icon_for_mac(self, mac: str | None) -> tk.PhotoImage | None:

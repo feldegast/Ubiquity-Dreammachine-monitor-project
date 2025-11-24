@@ -9,3 +9,4 @@ STATUS_ICON_SIZE      = 12          # px – single source of truth for icon siz
 COLOR_VENDOR_LABELLED = "#00C000"
 COLOR_VENDOR_KNOWN    = "#0077FF"
 COLOR_VENDOR_UNKNOWN  = "#C00000"
+COLOR_VENDOR_LAA      = "#DF08DF"   # locally-administered / randomized (LAA)

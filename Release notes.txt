@@ -1,0 +1,26 @@
+## UDM Monitor 6.0
+
+This release is a big UI refactor aimed at making the app easier to use *and* easier to maintain.
+
+**Highlights**
+
+- Split the giant main table into three focused views:
+  - **Alerts** (top): recent high-volume alerts and threshold events.
+  - **Active Connections** (middle): live flows on your LAN.
+  - **Per-Device Totals** (bottom): per-MAC aggregates and destinations.
+- Added **status icons** (small coloured squares) in all three tables:
+  - Green = labelled host (custom name)
+  - Blue  = known vendor
+  - Red   = unknown/randomised vendor
+- New **legend** at the top explaining both row highlights and status colours.
+- Column widths are now **remembered** between runs and can be tuned via the UI.
+
+**Under the hood**
+
+- The three tables are now built and refreshed by helper functions in `ui_tables.py`.
+- Column widths and table sorting have been de-tangled and are easier to adjust.
+- Various minor bugs fixed (geometry manager conflicts, sorting issues, linter noise).
+
+If you’re upgrading, simply drop in the new `main.py`, `ui_tables.py`, `ui_theme.py`,
+`monitor_core.py`, `collectors.py`, and `vendor_resolver.py`, keeping your existing
+`config.json`/`data` directory.
