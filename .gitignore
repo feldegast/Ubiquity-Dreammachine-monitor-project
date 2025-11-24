@@ -163,3 +163,6 @@ data/mac_labels.json
 __pycache__/collectors.cpython-312.pyc
 vendors_offline.py
 SNMP monitor project 2025-11-21-09-00.zip
+__pycache__/main.cpython-312.pyc
+__pycache__/ui_tables.cpython-312.pyc
+__pycache__/ui_theme.cpython-312.pyc

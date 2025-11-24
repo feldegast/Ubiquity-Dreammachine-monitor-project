@@ -2,29 +2,29 @@
   "column_widths": {
     "active": {
       "bytes": 110,
-      "dest": 420,
-      "first": 20,
+      "dest": 302,
+      "first": 105,
       "last": 140,
-      "local": 160,
-      "mac": 84,
+      "local": 139,
+      "mac": 87,
       "over1mb": 70,
-      "vendor": 220
+      "vendor": 207
     },
     "agg": {
       "bytes": 110,
-      "dest": 696,
-      "mac": 85,
-      "sightings": 20,
-      "vendor": 220
+      "dest": 622,
+      "mac": 87,
+      "sightings": 105,
+      "vendor": 207
     },
     "alerts": {
-      "bytes": 110,
-      "dest": 448,
-      "local": 160,
-      "mac": 82,
-      "note": 120,
-      "time": 20,
-      "vendor": 220
+      "bytes": 122,
+      "dest": 361,
+      "local": 139,
+      "mac": 87,
+      "note": 139,
+      "time": 105,
+      "vendor": 207
     }
   },
   "copy_limit_rows": 200,

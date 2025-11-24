@@ -26,6 +26,32 @@ from monitor_core import (
     _walk_at_mib,
     normalize_mac,
 )
+from ui_tables import (
+    COL_W_FIRST,
+    COL_W_MAC,
+    COL_W_VEND,
+    COL_W_DEST,
+    COL_W_LOCAL,
+    COL_W_LAST,
+    COL_W_BYTES,
+    COL_W_STATUS,
+    build_alerts_section,
+    build_active_section,
+    build_aggregates_section,
+    refresh_alerts_table,
+    refresh_active_table,
+    refresh_aggregates_table,
+)
+
+from ui_theme import (
+    NEW_DEVICE_BACKGROUND,
+    UNKNOWN_VENDOR_BACKGROUND,
+    HIGH_VOLUME_BACKGROUND,
+    STATUS_ICON_SIZE,
+    COLOR_VENDOR_LABELLED,
+    COLOR_VENDOR_KNOWN,
+    COLOR_VENDOR_UNKNOWN,
+)
 
 from collections import defaultdict
 
@@ -98,8 +124,8 @@ except Exception:
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "5.11.0"
-VERSION_DATE = "2025.11.20"
+VERSION = "6.0.0"
+VERSION_DATE = "2025.11.24"
 
 #uaser data defaults
 ENABLE_CONNTRACK_SSH = True   # ← make sure this is here and not commented out
@@ -165,17 +191,6 @@ COL_W_DEST  = 420
 COL_W_LOCAL = 160
 COL_W_LAST  = 140
 COL_W_BYTES = 110
-
-#table highlights
-UNKNOWN_VENDOR_BACKGROUND = "#FFECEC"
-HIGH_VOLUME_BACKGROUND    = "#D2F5FF"
-NEW_DEVICE_BACKGROUND     = "#F7FFD2"
-
-# status icon colours and size (image-based)
-STATUS_ICON_SIZE      = 12          # px – single source of truth for icon size
-COLOR_VENDOR_LABELLED = "#00C000"
-COLOR_VENDOR_KNOWN    = "#0077FF"
-COLOR_VENDOR_UNKNOWN  = "#C00000"
 
 # --- Enable SSH conntrack collector ---
 SSH_SECRETS_FILE = "ssh_secrets.json"
@@ -1617,6 +1632,143 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # --- [UI|LAYOUT] _setup_synced_column_widths ------------------------------------    
+    def _setup_synced_column_widths(self) -> None:
+        """
+        Keep related columns (by *meaning*, not just ID) in sync across
+        Alerts, Active, and Aggregates.
+
+        Logical groups:
+
+        - "time_like":  Alerts.time, Active.first, Agg.sightings
+        - "mac":        Alerts.mac, Active.mac, Agg.mac
+        - "vendor":     Alerts.vendor, Active.vendor, Agg.vendor
+        - "local":      Alerts.local, Active.local
+        - "dest":       Alerts.dest, Active.dest, Agg.dest
+
+        When you resize one of these in any table, we propagate that width
+        to the corresponding columns in the other tables.
+        """
+        try:
+            # Gather the three main tables if they exist
+            tables: dict[str, object] = {
+                "alerts": getattr(self, "alerts", None),
+                "active": getattr(self, "tree", None),
+                "agg":    getattr(self, "agg", None),
+            }
+
+            # Drop any that don't exist (e.g. during early startup)
+            tables = {name: tv for name, tv in tables.items() if tv is not None}
+            if not tables:
+                return
+
+            # Logical mapping of column groups -> per-table column IDs
+            SYNC_GROUPS: dict[str, dict[str, str]] = {
+                # Time / First Seen / Sightings share the same width
+                "time_like": {
+                    "alerts": "time",
+                    "active": "first",
+                    "agg":    "sightings",
+                },
+                "mac": {
+                    "alerts": "mac",
+                    "active": "mac",
+                    "agg":    "mac",
+                },
+                "vendor": {
+                    "alerts": "vendor",
+                    "active": "vendor",
+                    "agg":    "vendor",
+                },
+                "local": {
+                    "alerts": "local",
+                    "active": "local",
+                },
+                "dest": {
+                    "alerts": "dest",
+                    "active": "dest",
+                    "agg":    "dest",
+                },
+                # If you decide later that bytes should sync too,
+                # you can add a "bytes" group here.
+            }
+
+            # Filter out groups where fewer than 2 tables participate
+            # (no point syncing if only one table has that column).
+            pruned_groups: dict[str, dict[str, str]] = {}
+            for gname, mapping in SYNC_GROUPS.items():
+                # keep only entries for tables that actually exist
+                present = {
+                    tname: col_id
+                    for tname, col_id in mapping.items()
+                    if tname in tables
+                }
+                if len(present) >= 2:
+                    pruned_groups[gname] = present
+
+            if not pruned_groups:
+                return
+
+            def _on_column_resize(event):
+                """
+                Called on ButtonRelease-1 on any Treeview.
+
+                For each logical group this Treeview participates in,
+                read its new width and propagate to the matching columns
+                in the other tables of that group.
+                """
+                tv = event.widget
+                # Work out which logical table name this tv corresponds to
+                tv_name = None
+                for name, obj in tables.items():
+                    if obj is tv:
+                        tv_name = name
+                        break
+                if tv_name is None:
+                    return  # not one of our three main tables
+
+                # For each group, if this table participates, propagate width
+                for gname, mapping in pruned_groups.items():
+                    if tv_name not in mapping:
+                        continue
+
+                    src_col = mapping[tv_name]
+                    # If the column doesn't exist on this tv, skip
+                    try:
+                        col_info = tv.column(src_col)
+                        width = col_info.get("width")
+                    except Exception:
+                        continue
+
+                    if width is None:
+                        continue
+
+                    # Apply same width to other tables in this group
+                    for other_name, other_col in mapping.items():
+                        if other_name == tv_name:
+                            continue
+                        other_tv = tables.get(other_name)
+                        if other_tv is None:
+                            continue
+                        try:
+                            other_tv.column(other_col, width=width)
+                        except Exception:
+                            # don't let a bad column kill the whole sync
+                            continue
+
+            # Bind once per table
+            for tv in tables.values():
+                try:
+                    tv.bind("<ButtonRelease-1>", _on_column_resize, add="+")
+                except Exception:
+                    pass
+
+        except Exception:
+            if DEBUG:
+                import traceback
+                print("[UI] _setup_synced_column_widths failed:")
+                traceback.print_exc()
+
     # --- [UI|LAYOUT] _center_window ------------------------------------
     def _center_window(self, offset_y: int = -80):
         self.update_idletasks()
@@ -2111,15 +2263,6 @@ class App(tk.Tk):
         tv["displaycolumns"] = cols_tuple
         tv["show"] = "headings"
 
-    # --- [UI] _vendor_quality_glyph ------------------------------------
-    def _vendor_quality_glyph(self, vendor: str | None) -> str:
-        v = (vendor or "").lower()
-        if not v or v == "unknown":
-            return "🟥"   # unknown
-        if "locally administered" in v or "randomized" in v or "laa" in v:
-            return "🟪"   # randomized/LAA
-        return "🟩"       # known vendor
-
     # --- [UI|BUILD] _build_ui --------------------------------------------------
     def _build_ui(self):
         """
@@ -2276,135 +2419,10 @@ class App(tk.Tk):
         # SECTION: Alerts SECTION (top of left content)
         # =============================================================================
         # region Alerts SECTION (top of left content)
-
+    
         alert_outer = ttk.Frame(paned)
         paned.add(alert_outer, weight=1)
-
-        # Global filter row sits at the very top so it visually applies to everything,
-                # Global filter row sits at the very top so it visually applies to everything,
-        # not just the Alerts table.
-        filter_row = ttk.Frame(alert_outer)
-        filter_row.pack(fill="x", pady=(4, 0))
-
-        ttk.Label(filter_row, text="Filter (all tables):").pack(side="left")
-
-        self.alert_filter_var = tk.StringVar()
-        entry = ttk.Entry(filter_row, textvariable=self.alert_filter_var, width=30)
-        entry.pack(side="left", padx=(4, 8))
-
-        # live filtering as the user types (global across all tables)
-        self.alert_filter_var.trace_add(
-            "write", lambda *args: self._apply_alert_filter()
-        )
-
-        ttk.Button(
-            filter_row,
-            text="Clear",
-            command=lambda: self.alert_filter_var.set(""),
-        ).pack(side="left")
-
-        # ------------------------------------------------------------------
-        # Legend for row highlight colours (right-aligned, next to details)
-        # ------------------------------------------------------------------
-        legend = ttk.Frame(filter_row)
-        legend.pack(side="right")
-
-        def _legend_item(parent, color: str, text: str) -> None:
-            swatch = tk.Label(
-                parent,
-                width=2,
-                background=color,
-                borderwidth=1,
-                relief="solid",
-            )
-            swatch.pack(side="left", padx=(0, 2))
-            ttk.Label(parent, text=text).pack(side="left", padx=(0, 8))
-
-        _legend_item(legend, NEW_DEVICE_BACKGROUND, "New device")
-        _legend_item(legend, UNKNOWN_VENDOR_BACKGROUND, "Unknown / randomised")
-        _legend_item(legend, HIGH_VOLUME_BACKGROUND, "High volume (≥ 1 MB)")
-        
-        # Status icon meanings (same swatch style, status colours)
-        _legend_item(legend, COLOR_VENDOR_LABELLED, "Labelled host")
-        _legend_item(legend, COLOR_VENDOR_KNOWN,    "Known vendor")
-        _legend_item(legend, COLOR_VENDOR_UNKNOWN,  "Unknown/randomised")
-        # ----end legand --------------------------------------------------------------
-
-        # Alerts title now comes *below* the filter row
-        self.alerts_title = tk.StringVar(value="Alerts")
-        ttk.Label(
-            alert_outer,
-            textvariable=self.alerts_title,
-            anchor="w",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(side="top", anchor="w", pady=(2, 0))
-
-        alertf = ttk.Frame(alert_outer)
-        alertf.pack(fill="both", expand=True)
-
-        alerts_labels = {
-            "time":   "Time",
-            "mac":    "MAC",
-            "vendor": "Vendor/Host",
-            "dest":   "Destination",
-            "local":  "Local",
-            "bytes":  "Bytes (TX)",
-            "note":   "Note",
-        }
-        self.alerts = ttk.Treeview(
-            alertf,
-            columns=tuple(alerts_labels),
-            show="tree headings",   # show #0 (icon) + headings
-            height=8,
-        )
-        _force_headings(self.alerts, alerts_labels)
-        
-        # #0 = tiny status icon column
-        self.alerts.column("#0", width=COL_W_STATUS, minwidth=COL_W_STATUS, stretch=False, anchor="w")
-        self.alerts.heading("#0", text="")
-
-        # NEW: clickable sorting for Alerts
-        self._setup_sorting(
-            self.alerts,
-            table_name="alerts",
-            default_col="time",
-            default_reverse=True,
-        )
-
-        self.alerts.column("time",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
-        self.alerts.column("mac",    width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
-        self.alerts.column("vendor", width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
-        self.alerts.column("dest",   width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=True, anchor="w")
-        self.alerts.column("local",  width=COL_W_LOCAL, minwidth=COL_W_LOCAL, stretch=False, anchor="w")
-        self.alerts.column("bytes",  width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
-        self.alerts.column("note",   width=180,         minwidth=120,         stretch=False,  anchor="w")
-
-        self._apply_saved_column_widths("alerts", self.alerts)
-
-        self.alerts.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
-        self.alerts.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
-        self.alerts.tag_configure("new_device",     background=NEW_DEVICE_BACKGROUND)
-
-        scry1 = ttk.Scrollbar(alertf, orient="vertical", command=self.alerts.yview)
-        self.alerts.configure(yscrollcommand=scry1.set)
-        self.alerts.pack(side="left", fill="both", expand=True, pady=8)
-        scry1.pack(side="left", fill="y", padx=(0, 4), pady=8)  # smaller gap to the right
-
-        if hasattr(self, "_bind_edit_on_doubleclick"):
-            self._bind_edit_on_doubleclick(
-                self.alerts,
-                mac_col="mac",
-                vendor_col="vendor",
-                local_col="local",
-            )
-
-        self.alerts.bind("<Button-3>", self._on_right_click_active)
-
-        # Update details panel when selection changes in Alerts
-        self.alerts.bind(
-            "<<TreeviewSelect>>",
-            lambda e: self._update_details_from_tree(self.alerts, "alerts"),
-        )
+        build_alerts_section(self, alert_outer)
 
         # endregion Alerts SECTION (top of left content)
         
@@ -2415,100 +2433,7 @@ class App(tk.Tk):
 
         active_outer = ttk.Frame(paned)
         paned.add(active_outer, weight=2)
-
-        self.active_title = tk.StringVar(value="Active Connections (top 200)")
-        ttk.Label(
-            active_outer,
-            textvariable=self.active_title,
-            anchor="w",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(side="top", anchor="w", pady=(4, 0))
-
-        midf = ttk.Frame(active_outer)
-        midf.pack(fill="both", expand=True)
-
-        active_labels = {
-            "first":  "First Seen",
-            "mac":    "MAC",
-            "vendor": "Vendor/Host",
-            "dest":   "Destination",
-            "local":  "Local",
-            "last":   "Last Seen",
-            "bytes":  "Bytes (TX)",
-            "over1mb":">1MB?",
-        }
-
-        # DEBUG-only column included only when debugging
-        if DEBUG:
-            active_labels["state"] = "State"
-
-        # Status icon lives in column #0, text columns in active_labels
-        self.tree = ttk.Treeview(
-            midf,
-            columns=list(active_labels.keys()),
-            show="tree headings",       # show #0 (icon) + headings
-            height=10,
-            selectmode="browse",
-        )
-
-        # #0 column = tiny status icon
-        self.tree.column("#0", width=COL_W_STATUS, minwidth=COL_W_STATUS, stretch=False, anchor="w")
-        self.tree.heading("#0", text="")
-
-        # Define headings for the named columns
-        for col, label in active_labels.items():
-            self.tree.heading(col, text=label, anchor="center")
-
-        # Column widths (same constants as before)
-        self.tree.column("first",   width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="w")
-        self.tree.column("mac",     width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
-        self.tree.column("vendor",  width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
-        self.tree.column("dest",    width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=True,  anchor="w")
-        self.tree.column("local",   width=COL_W_LOCAL, minwidth=COL_W_LOCAL, stretch=False, anchor="w")
-        self.tree.column("last",    width=COL_W_LAST,  minwidth=COL_W_LAST,  stretch=False, anchor="w")
-        self.tree.column("bytes",   width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
-        self.tree.column("over1mb", width=70,          minwidth=70,          stretch=False, anchor="center")
-
-        if DEBUG:
-            self.tree.column("state", width=110, minwidth=80, stretch=False, anchor="w")
-
-        # Row tags
-        self.tree.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
-        self.tree.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
-        self.tree.tag_configure("new_device",     background=NEW_DEVICE_BACKGROUND)
-
-        self.tree.bind("<Button-3>", self._on_right_click_active)
-
-        self._apply_saved_column_widths("active", self.tree)
-
-        self._setup_sorting(
-            self.tree,
-            table_name="active",
-            default_col="first",      # or "bytes" if you prefer
-            default_reverse=False,   # oldest first / newest last
-        )
-
-        # Scrollbar + geometry: PACK ONLY (no grid)
-        scry2 = ttk.Scrollbar(midf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scry2.set)
-        self.tree.pack(side="left", fill="both", expand=True, pady=8)
-        scry2.pack(side="left", fill="y", padx=(0, 4), pady=8)
-
-        if hasattr(self, "_bind_edit_on_doubleclick"):
-            self._bind_edit_on_doubleclick(
-                self.tree,
-                mac_col="mac",
-                vendor_col="vendor",
-                local_col="local",
-            )
-        if hasattr(self, "_apply_state_visibility"):
-            self._apply_state_visibility()
-
-        # Update details panel when selection changes in Active
-        self.tree.bind(
-            "<<TreeviewSelect>>",
-            lambda e: self._update_details_from_tree(self.tree, "active"),
-        )
+        build_active_section(self, active_outer)
 
         # endregion Active Connections (middle of left content)
 
@@ -2519,77 +2444,18 @@ class App(tk.Tk):
 
         agg_outer = ttk.Frame(content)
         agg_outer.pack(fill="both", expand=False, padx=8, pady=(0, 4))
-
-        self.agg_title = tk.StringVar(value="Per-Device Totals")
-        ttk.Label(
-            agg_outer,
-            textvariable=self.agg_title,
-            anchor="w",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(side="top", anchor="w", pady=(4, 0))
-
-        aggf = ttk.Frame(agg_outer)
-        aggf.pack(fill="both", expand=True)
-
-        agg_labels = {
-            "sightings": "Sightings",
-            "mac":       "MAC",
-            "vendor":    "Vendor/Host",
-            "dest":      "Destination",
-            "bytes":     "Total Bytes",
-        }
-
-        self.agg = ttk.Treeview(
-            aggf,
-            columns=tuple(agg_labels),
-            show="tree headings",   # show #0 (status icon) + headings
-            height=8,
-        )
-        _force_headings(self.agg, agg_labels)
-
-        # #0 = tiny status icon column
-        self.agg.column("#0",        width=COL_W_STATUS, minwidth=COL_W_STATUS, stretch=False, anchor="w")
-        self.agg.column("sightings", width=COL_W_FIRST, minwidth=COL_W_FIRST, stretch=False, anchor="e")
-        self.agg.column("mac",       width=COL_W_MAC,   minwidth=COL_W_MAC,   stretch=False, anchor="w")
-        self.agg.column("vendor",    width=COL_W_VEND,  minwidth=COL_W_VEND,  stretch=False, anchor="w")
-        self.agg.column("dest",      width=COL_W_DEST,  minwidth=COL_W_DEST,  stretch=True,  anchor="w")
-        self.agg.column("bytes",     width=COL_W_BYTES, minwidth=COL_W_BYTES, stretch=False, anchor="e")
-
-        # Clickable sorting for Aggregates
-        self._setup_sorting(
-            self.agg,
-            table_name="agg",
-            default_col="bytes",      # default: biggest talkers first
-            default_reverse=True,
-        )
-
-        self.agg.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
-        self.agg.tag_configure("high_volume",    background=HIGH_VOLUME_BACKGROUND)
-        self.agg.tag_configure("new_device",     background=NEW_DEVICE_BACKGROUND)
-
-        self.agg.bind("<Button-3>", self._on_right_click_active)
-        self._apply_saved_column_widths("agg", self.agg)
-
-        scry3 = ttk.Scrollbar(aggf, orient="vertical", command=self.agg.yview)
-        self.agg.configure(yscrollcommand=scry3.set)
-        self.agg.pack(side="left", fill="both", expand=True, pady=8)
-        scry3.pack(side="left", fill="y", padx=(0, 4), pady=8)  # smaller gap
-
-        if hasattr(self, "_bind_edit_on_doubleclick"):
-            self._bind_edit_on_doubleclick(
-                self.agg,
-                mac_col="mac",
-                vendor_col="vendor",
-                local_col=None,
-            )
-
-        # Update details panel when selection changes in Aggregates
-        self.agg.bind(
-            "<<TreeviewSelect>>",
-            lambda e: self._update_details_from_tree(self.agg, "agg"),
-        )
-
+        build_aggregates_section(self, agg_outer)
+        
         self._post_build_column_fix()
+
+        # All three main tables now exist; keep shared columns in sync
+        try:
+            self._setup_synced_column_widths()
+        except Exception:
+            if DEBUG:
+                import traceback
+                print("[UI] _setup_synced_column_widths failed in _build_ui:")
+                traceback.print_exc()
 
         # schedule refresh after widgets exist
         try:
@@ -2631,8 +2497,8 @@ class App(tk.Tk):
             # Apply to Tk's global scaling (affects fonts and some geometry)
             self.call("tk", "scaling", scale)
 
-            # Optional debug:
-            # print(f"[DPI] pixels_per_inch={pixels_per_inch:.2f}, scale={scale:.2f}")
+            if DEBUG:
+                print(f"[DPI] pixels_per_inch={pixels_per_inch:.2f}, scale={scale:.2f}")
 
         except Exception:
             # Never crash if DPI probing fails
@@ -2957,8 +2823,9 @@ class App(tk.Tk):
 
             self.cfg["details_width"] = int(details_width)
 
+            if DEBUG:
             # Optional: live debug while tuning
-            # print("[LIVE details_width]", self.cfg["details_width"])
+                print("[LIVE details_width]", self.cfg["details_width"])
 
         except Exception:
             pass
@@ -3551,7 +3418,9 @@ class App(tk.Tk):
                     details_width = max(0, total - left_w)
                     if details_width > 0:
                         self.cfg["details_width"] = int(details_width)
-                        print("DEBUG details_width:", self.cfg["details_width"])
+                        if DEBUG:
+                            print("DEBUG details_width:", self.cfg["details_width"])
+
             except Exception:
                 # don't let a layout issue break closing
                 pass
@@ -3772,121 +3641,22 @@ class App(tk.Tk):
         - Reschedules itself using after() while the app is running.
         """
     
-        import queue
         import time
         
-        # --- [UI|NET] _fmt_dest ----------------------------------------------
-        # --- formatter for IP[:port] with cached rDNS if present
-        def _fmt_dest(remote_ip: str, remote_port):
-            try:
-                with _dns_lock:
-                    host = _dns_cache.get(remote_ip)
-            except Exception:
-                host = None
-            return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
-
-        # --- [UI|HELPER] _tags_for_row ---------------------------------------
-        # --- helper: decide which tags to apply based on vendor / bytes / "newness"
-        def _tags_for_row(vendor_text: str, bytes_val: int | float, *, is_new: bool = False) -> tuple[str, ...]:
-            tags: list[str] = []
-
-            v = (vendor_text or "").strip().lower()
-            if not v or v == "unknown":
-                tags.append("unknown_vendor")
-
-            try:
-                if int(bytes_val) >= 1_048_576:  # 1 MB threshold
-                    tags.append("high_volume")
-            except Exception:
-                pass
-
-            if is_new:
-                tags.append("new_device")
-
-            return tuple(tags)
-
         if DEBUG:
             print("[DEBUG] UI sees conn_map size:", len(self.core.conn_map))
             
         with self.core.data_lock:
+            
 
         # =============================================================================
         # SECTION: REFRESH.ALERTS (top) - drain queue, insert rows, toast
         # =============================================================================
         # region REFRESH.ALERTS (top) - drain queue, insert rows, toast
 
-            try:
-                while True:
-                    alert = self.core.alert_q.get_nowait()
+            # Alerts table
+            refresh_alerts_table(self, toaster=_TOASTER)
 
-                    # compute a vendor/label for the local endpoint’s MAC/IP
-                    local_hostport = alert.get("local", "")
-                    local_ip = local_hostport.rsplit(":", 1)[0] if ":" in local_hostport else ""
-                    mac_norm = normalize_mac(alert.get("mac", "") or "")
-                    vendor_disp = self._display_name(local_ip, mac_norm)
-
-                    # Destination: show "ip [hostname]:port" if hostname included on alert
-                    remote_txt = alert.get("remote", "")
-                    if alert.get("hostname"):
-                        dest_text = f'{remote_txt} [{alert["hostname"]}]'
-                    else:
-                        dest_text = remote_txt
-
-                    bytes_val = int(alert.get("bytes", 0) or 0)
-                    vendor_text = vendor_disp or ""
-
-                    # Heuristic: "new device" if the note starts with that phrase
-                    is_new = str(alert.get("note", "")).lower().startswith("new device")
-
-                    tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
-
-                    # Status icon in #0
-                    status_img = self._status_icon_for_mac(mac_norm)
-
-                    self.alerts.insert("", "end",
-                        image=status_img,   # first column (#0)
-                        values=(
-                            alert.get("time", ""),   # Time
-                            alert.get("mac", ""),    # MAC
-                            vendor_text,             # Vendor/Host
-                            dest_text,               # Destination
-                            local_hostport,          # Local
-                            bytes_val,               # Bytes (TX)
-                            alert.get("note", ""),   # Note
-                        ),
-                        tags=tags,
-                    )
-
-                    # Trim to last 500 alerts
-                    if len(self.alerts.get_children()) > 500:
-                        for iid in self.alerts.get_children()[:50]:
-                            self.alerts.delete(iid)
-
-                    # Optional Windows toast
-                    if _TOASTER:
-                        try:
-                            _TOASTER.show_toast(
-                                "Network Alert (>= 1 MB)",
-                                f'{alert.get("local","")} → {alert.get("remote","")}\n'
-                                f'{alert.get("vendor","")} {alert.get("mac","")}\n'
-                                f'bytes={alert.get("bytes",0)}',
-                                threaded=True,
-                                duration=5,
-                            )
-                        except Exception:
-                            pass
-            except queue.Empty:
-                pass
-
-
-            # After alerts table rebuilt:
-            try:
-                if hasattr(self, "alert_filter_var") and self.alert_filter_var.get():
-                    _apply = getattr(self, "_apply_alert_filter", None)
-                    if callable(_apply):
-                        _apply()
-            except Exception:
-                pass
 
         # endregion REFRESH.ALERTS (top) - drain queue, insert rows, toast
         
@@ -3895,71 +3665,15 @@ class App(tk.Tk):
         # =============================================================================
         # region REFRESH.ACTIVE (middle) - CONNECTIONS
 
-            self.tree.delete(*self.tree.get_children())
-
-            for key, rec in sorted(
-                self.core.conn_map.items(),
-                key=lambda kv: kv[1]["last_seen"],
-                reverse=True,
-            ):
-                # pre-filters (LAN, valid remote, state)
-                if not monitor_core._is_lan_client_ip(rec["local_ip"]):
-                    continue
-                if rec["remote_ip"] == "0.0.0.0":
-                    continue
-                if str(rec.get("state", "")).lower() in {"listen", "timewait", "closing"}:
-                    continue
-
-                # rDNS queuing
-                remote_ip = rec["remote_ip"]
-                remote_port = rec["remote_port"]
-                if RESOLVE_RDNS and remote_ip not in ("0.0.0.0", "127.0.0.1"):
-                    with _dns_lock:
-                        cached = _dns_cache.get(remote_ip)
-                        pending = remote_ip in _dns_pending
-                    if cached is None and not pending:
-                        with _dns_lock:
-                            _dns_pending.add(remote_ip)
-                        try:
-                            self._dns_q.put_nowait(remote_ip)
-                        except queue.Full:
-                            pass
-
-                dest_text = _fmt_dest(remote_ip, remote_port)
-                local_hp = f'{rec["local_ip"]}:{rec["local_port"]}'
-                mac_norm = normalize_mac(rec.get("local_mac") or "")
-                vendor_disp = self._display_name(rec.get("local_ip"), mac_norm)
-
-                bytes_val = int(rec.get("bytes_tx") or 0)
-                vendor_text = vendor_disp or ""
-
-                # "New" flow heuristic: first_seen == last_seen (i.e. just created this session)
-                is_new = rec.get("first_seen") == rec.get("last_seen")
-
-                tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
-                status_img = self._status_icon_for_mac(mac_norm)
-
-                row_vals = [
-                    rec.get("first_seen", ""),               # First Seen
-                    rec.get("local_mac", ""),                # MAC
-                    vendor_text,                             # Vendor/Host
-                    dest_text,                               # Destination
-                    local_hp,                                # Local
-                    rec.get("last_seen", ""),                # Last Seen
-                    bytes_val,                               # Bytes (TX)
-                    "Yes" if rec.get("over_1mb") else "No",  # >1MB?
-                ]
-                if DEBUG:
-                    row_vals.append(str(rec.get("state", "")).lower())
-
-                self.tree.insert(
-                    "",
-                    "end",
-                    text="",           # no text in #0
-                    image=status_img,  # coloured square in #0
-                    values=tuple(row_vals),
-                    tags=tags,
-                )
+            # Active Connections table
+            refresh_active_table(
+                self,
+                dns_lock=_dns_lock,
+                dns_cache=_dns_cache,
+                dns_pending=_dns_pending,
+                resolve_rdns=RESOLVE_RDNS,
+            )
+            
         # endregion REFRESH.ACTIVE (middle) - CONNECTIONS
         
         # =============================================================================
@@ -3967,75 +3681,15 @@ class App(tk.Tk):
         # =============================================================================
         # region REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS
 
-            self.agg.delete(*self.agg.get_children())
 
-            # 1) MACs discovered via ARP (devices present on LAN)
-            macs_from_arp = {m for m in self.core.ip2mac.values() if m and m != "00:00:00:00:00:00"}
-
-            # 2) MACs that we’ve accumulated traffic for
-            macs_from_aggs = set(self.core.aggregates.keys())
-
-            # 3) Union = all devices we know about
-            all_macs = macs_from_arp | macs_from_aggs
-
-            for mac in sorted(all_macs):
-                mac_norm = normalize_mac(mac)
-                vendor = self._display_name(ip=None, mac=mac_norm)
-                dests = self.core.aggregates.get(mac, {})
-
-                if not dests:
-                    # skip empty placeholders entirely
-                    continue
-
-                for (rip, rport), stats in sorted(
-                    dests.items(),
-                    key=lambda kv: (-int(kv[1].get("bytes", 0)), kv[0]),
-                ):
-                    # queue rDNS for aggregates as well
-                    if RESOLVE_RDNS and rip not in ("0.0.0.0", "127.0.0.1"):
-                        with _dns_lock:
-                            cached = _dns_cache.get(rip)
-                            pending = rip in _dns_pending
-                        if cached is None and not pending:
-                            with _dns_lock:
-                                _dns_pending.add(rip)
-                            try:
-                                self._dns_q.put_nowait(rip)
-                            except queue.Full:
-                                pass
-
-                    # same destination formatter: IP [host]:port if cached
-                    try:
-                        with _dns_lock:
-                            host = _dns_cache.get(rip)
-                    except Exception:
-                        host = None
-                    agg_dest = f"{rip} [{host}]:{rport}" if host else f"{rip}:{rport}"
-
-                    sightings = int(stats.get("sightings") or 0)
-                    bytes_val = int(stats.get("bytes") or 0)
-                    vendor_text = vendor or ""
-
-                    # Heuristic: a "new" device if we’ve only seen it a couple of times
-                    is_new = sightings <= 2
-
-                    tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
-                    status_img = self._status_icon_for_mac(mac_norm)
-
-                    self.agg.insert(
-                        "",
-                        "end",
-                        text="",
-                        image=status_img,
-                        values=(
-                            sightings,     # Sightings
-                            mac_norm,      # MAC (normalized)
-                            vendor_text,   # Vendor/Host
-                            agg_dest,      # Destination
-                            bytes_val,     # Total Bytes
-                        ),
-                        tags=tags,
-                    )
+            # Aggregates table
+            refresh_aggregates_table(
+                self,
+                dns_lock=_dns_lock,
+                dns_cache=_dns_cache,
+                dns_pending=_dns_pending,
+                resolve_rdns=RESOLVE_RDNS,
+            )
         
 
         # endregion REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS
