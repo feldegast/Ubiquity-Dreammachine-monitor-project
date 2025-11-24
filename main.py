@@ -125,7 +125,7 @@ except Exception:
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "6.0.0"
+VERSION = "6.0.1"
 VERSION_DATE = "2025.11.24"
 
 #uaser data defaults
@@ -184,6 +184,7 @@ DETAILS_ROW_PADY             = 2
 
 
 # ===== shared widths so first 4 columns align across tables =====
+'''
 COL_W_STATUS = 32
 COL_W_FIRST = 20
 COL_W_MAC   = 20
@@ -192,6 +193,7 @@ COL_W_DEST  = 420
 COL_W_LOCAL = 160
 COL_W_LAST  = 140
 COL_W_BYTES = 110
+'''
 
 # --- Enable SSH conntrack collector ---
 SSH_SECRETS_FILE = "ssh_secrets.json"
@@ -2781,7 +2783,7 @@ class App(tk.Tk):
         - known    : no label/LAA, but vendor lookup != Unknown
         - unknown  : empty/zero/randomised/unknown vendor
         """
-        from vendor_resolver import vendor_for_mac, _is_locally_admin
+        from vendor_resolver import vendor_for_mac, _is_locally_administered as _is_locally_admin
         # (Path import kept only so linters don't whinge if used elsewhere)
         from pathlib import Path  # noqa: F401
 
@@ -3040,11 +3042,11 @@ class App(tk.Tk):
 
         try:
             # Basic counters from core
-            active = len(getattr(core, "conn_map", {}) or {})
-            last_counts = getattr(core, "last_counts", {}) or {}
-            arp   = last_counts.get("arp", 0)
-            tcp   = last_counts.get("tcp", 0)
-            flows = last_counts.get("flows", 0)
+            active      = len(getattr(core, "conn_map", {}) or {})
+            last_counts = getattr(core,     "last_counts", {}) or {}
+            arp         = last_counts.get(  "arp", 0)
+            tcp         = last_counts.get(  "tcp", 0)
+            flows       = last_counts.get(  "flows", 0)
 
             bits = []
 
