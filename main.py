@@ -41,6 +41,9 @@ from ui_tables import (
     refresh_alerts_table,
     refresh_active_table,
     refresh_aggregates_table,
+    apply_default_alerts_column_widths,
+    apply_default_active_column_widths,
+    apply_default_aggregates_column_widths,
 )
 
 from ui_theme import (
@@ -158,8 +161,13 @@ _DEFAULT_CFG = {
     "copy_limit_rows": COPY_LIMIT_ROWS,
     "debug_log_tail_lines": DEBUG_LOG_TAIL_LINES,
     "enable_toasts": ENABLE_TOASTS,   # keep False unless you really want the Win hook
+
+    # Filter defaults (persisted)
+    "filter_hide_web": False,
+    "filter_only_unknown_laa": False,
+    "filter_high_volume_only": False,
     # add any other user-tunable settings here
-    
+
     "window_geometry": None,        # e.g. "1488x964+100+50"
     "window_state": "normal",       # "normal" or "zoomed"
     "column_widths": {              # per-table column widths
@@ -251,15 +259,16 @@ _SILENCED_MACS = {m.upper() for m in SILENCED_MACS}
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
-HOST_ALIAS_PATH = (BASE_DIR / "data" / "host_aliases.json") if "BASE_DIR" in globals() else Path("data/host_aliases.json")
-HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
+# New names, at project root (same folder as main.py).
+# If you prefer them in ./data just change BASE_DIR -> DATA_DIR.
+HOST_ALIAS_PATH   = DATA_DIR / "local_ip_labels.json"
+MAC_LABELS_PATH   = DATA_DIR / "local_mac_labels.json"
 
-# Per-device custom labels (MAC → friendly name)
-MAC_LABELS_PATH = DATA_DIR / "mac_labels.json" # was mac-vendor-overrides.txt before changed to JSON
+HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
 MAC_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Vendor enrichment overrides (OUI / full-MAC → vendor), JSON-based
-VENDOR_OVERRIDES_JSON = DATA_DIR / "vendor_overrides.json"
+VENDOR_OVERRIDES_JSON = DATA_DIR / "vmac-vendor-overrides.txt"
 VENDOR_OVERRIDES_JSON.parent.mkdir(parents=True, exist_ok=True)
 
 #VENDOR_DB = VendorDB(base_dir=BASE_DIR)
@@ -322,44 +331,35 @@ _MAC_RE = re.compile(r"[0-9A-Fa-f]{2}")
 
 
 # --- [NET] load_mac_labels ------------------------------------
-def load_mac_labels() -> dict[str, str]:
+def load_mac_labels() -> dict:
     """
-    Load MAC → label mappings from disk.
-
-    Reads data from ``data/mac_labels.json`` (if present) and returns a mapping
-    of normalized MAC addresses (``AA:BB:CC:DD:EE:FF``) to user-defined labels.
-
-    The file format is a simple JSON object:
-
-        {
-          "AA:BB:CC:DD:EE:FF": "Lee's PC",
-          "11:22:33:44:55:66": "NAS"
-        }
-
-    Any malformed or missing file is treated as "no labels" and returns an empty
-    dict. This function never raises on I/O errors.
+    Load local_mac_labels.json and normalise all entries to:
+        { MAC : { "label": "NAME" } }
     """
-    labels: dict[str, str] = {}
-    path = MAC_LABELS_PATH
-
-    if not path.is_file():
-        return labels
-
     try:
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            for k, v in data.items():
-                if not k:
-                    continue
-                mac = str(k).strip().upper()
-                # Store empty-string labels as "no label"
-                labels[mac] = "" if v is None else str(v)
+        with MAC_LABELS_PATH.open("r", encoding="utf-8") as f:
+            raw = json.load(f) or {}
     except Exception:
-        # Stay resilient if file is malformed
-        pass
+        return {}
 
-    return labels
+    fixed = {}
+
+    for mac, entry in raw.items():
+        # Case 1: old format { MAC: "Label" }
+        if isinstance(entry, str):
+            fixed[mac.upper()] = {"label": entry.strip()}
+
+        # Case 2: expected new format { MAC: { "label": "Label" } }
+        elif isinstance(entry, dict):
+            lbl = entry.get("label") or ""
+            fixed[mac.upper()] = {"label": lbl.strip()}
+
+        # Anything unexpected → safely ignore
+        else:
+            continue
+
+    return fixed
+
 
 # --- [NET] save_mac_labels ------------------------------------
 def save_mac_labels(labels: dict[str, str]) -> None:
@@ -1303,6 +1303,80 @@ class App(tk.Tk):
                     except Exception:
                         continue
 
+    # endregion UI WIDGETS
+
+    # =============================================================================
+    # SECTION: SHARED HELPERS FOR REFRESH FUNCTIONS
+    # =============================================================================
+    # region: SHARED HELPERS FOR REFRESH FUNCTIONS
+
+    # --- [UI|LAYOUT] _reset_column_widths ----------------------
+    def _reset_column_widths(self) -> None:
+        """
+        Reset all Treeview column widths back to their built-in defaults and
+        clear any saved overrides in config.json.
+        """
+        # 1) Reset the Treeviews using ui_tables helpers
+
+        # ===================================================================================
+        # SECTION: Alerts table
+        # ===================================================================================
+        # region: Alerts table
+    
+        try:
+            if hasattr(self, "alerts") and self.alerts is not None:
+                apply_default_alerts_column_widths(self.alerts)
+        except Exception:
+            pass
+
+        # endregion Alerts table
+
+        # ===================================================================================
+        # SECTION: Active Connections table
+        # ===================================================================================
+        # region: Active Connections table
+    
+        try:
+            if hasattr(self, "tree") and self.tree is not None:
+                # DEBUG is a module-global in main.py
+                apply_default_active_column_widths(self.tree, DEBUG)
+        except Exception:
+            pass
+        # endregion Active Connections table
+
+        # ===================================================================================
+        # SECTION: Aggregates table
+        # ===================================================================================
+        # region: Aggregates table
+    
+        try:
+            if hasattr(self, "agg") and self.agg is not None:
+                apply_default_aggregates_column_widths(self.agg)
+        except Exception:
+            pass
+
+        # endregion Aggregates table
+
+        # ===================================================================================
+        # SECTION: Clear any saved column width overrides in the config
+        # ===================================================================================
+        # region: Clear any saved column width overrides in the config
+
+        # 2) Clear any saved column width overrides in the config
+        try:
+            cfg = self.cfg or {}
+            col_cfg = cfg.get("column_widths", {})
+            col_cfg["alerts"] = {}
+            col_cfg["active"] = {}
+            col_cfg["agg"] = {}
+            cfg["column_widths"] = col_cfg
+            self.cfg = cfg
+            self.save_config()
+        except Exception:
+            pass
+
+        # endregion Clear any saved column width overrides in the config
+
     # --- [UI|LAYOUT] _apply_saved_column_widths ---------------------
     def _apply_saved_column_widths(self, table_name: str, tv: ttk.Treeview) -> None:
         """
@@ -1331,84 +1405,71 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def _clear_details_panel(self) -> None:
+        """Show a neutral 'no row selected' state in the details panel."""
+        self.detail_mac.set("No row selected")
+        self.detail_name.set("Unknown / unrecognised vendor")
+        self.detail_local.set("-")
+        self.detail_remote.set("-")
+        self.detail_when.set("-")
+        self.detail_bytes.set("-")
+        self.detail_note.set("-")
+        self.detail_mac_flags.set("-")
+
     # --- [UI|DETAILS] _build_details_panel ------------------------------------
-    def _build_details_panel(self, parent) -> None:
+    def _build_details_panel(self, parent: tk.Frame) -> None:
+    # ------------------------------------------------------------------
+    # Right-hand "Selected Device / Connection" panel
+    # ------------------------------------------------------------------
         """
         Build the right-hand device details panel.
 
-        Creates labels and read-only fields for:
-        - Table/source name
-        - Local IP and MAC
-        - Vendor/Host and Name/Alias
-        - Destination URI (wrapped nicely)
-        - Byte count, timestamps, and notes
-        - Local/remote ports, connection state, and >1MB flag
-
-        The panel is fed by _update_details_from_tree() when a row is selected.
+        It shows a summary of the currently selected row from any table:
+        Alerts, Active, or Aggregates.
         """
-        
+
         import tkinter as tk
         from tkinter import ttk
 
-        # Use tunables so you can experiment easily
-        frame = ttk.LabelFrame(
-            parent,
-            text="Selected Device / Connection",
-            width=DETAILS_PANEL_WIDTH_DEFAULT,
-        )
-        # Minimal padding so it sits close to the table scrollbars
-        frame.pack(fill="both", expand=True, padx=(2, 4), pady=4)
-        self.details_frame = frame
+        frame = ttk.LabelFrame(parent, text="Selected Device / Connection")
+        frame.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # Backing StringVars for fields
-        self.detail_table  = getattr(self, "detail_table",  tk.StringVar(value="(none)"))
-        self.detail_when   = getattr(self, "detail_when",   tk.StringVar(value=""))
-        self.detail_ip     = getattr(self, "detail_ip",     tk.StringVar(value=""))
-        self.detail_mac    = getattr(self, "detail_mac",    tk.StringVar(value=""))
-        self.detail_vendor = getattr(self, "detail_vendor", tk.StringVar(value=""))
-        self.detail_name   = getattr(self, "detail_name",   tk.StringVar(value=""))
-        self.detail_dest   = getattr(self, "detail_dest",   tk.StringVar(value=""))
-        self.detail_bytes  = getattr(self, "detail_bytes",  tk.StringVar(value=""))
-        self.detail_note   = getattr(self, "detail_note",   tk.StringVar(value=""))
+        # StringVars stored on self so _update_details_from_tree can update them
+        self.detail_mac = tk.StringVar(value="No row selected")
+        self.detail_name = tk.StringVar(value="Unknown / unrecognised vendor")
+        self.detail_local = tk.StringVar(value="-")
+        self.detail_remote = tk.StringVar(value="-")
+        self.detail_when = tk.StringVar(value="-")
+        self.detail_bytes = tk.StringVar(value="-")
+        self.detail_note = tk.StringVar(value="-")
+        self.detail_mac_flags = tk.StringVar(value="-")
 
+        # Small 2-column grid of labels
         rows = [
-            ("Source",        self.detail_table),
-            ("IP address",    self.detail_ip),
-            ("MAC address",   self.detail_mac),
-            ("Vendor / Host", self.detail_vendor),
-            ("Name / alias",  self.detail_name),
-            ("Destination",   self.detail_dest),
-            ("Bytes",         self.detail_bytes),
-            ("When",          self.detail_when),
-            ("Note",          self.detail_note),
+            ("MAC Address:", self.detail_mac),
+            ("Device / Vendor:", self.detail_name),
+            ("Local endpoint:", self.detail_local),
+            ("Remote endpoint:", self.detail_remote),
+            ("When:", self.detail_when),
+            ("Bytes (TX):", self.detail_bytes),
+            ("Notes:", self.detail_note),
+            ("MAC status:", self.detail_mac_flags),
         ]
 
-        for r, (label, var) in enumerate(rows):
-            ttk.Label(frame, text=label + ":").grid(
-                row=r,
-                column=0,
-                sticky="nw",
-                padx=DETAILS_LABEL_PADX,
-                pady=DETAILS_ROW_PADY,
+        for r, (label_text, var) in enumerate(rows):
+            ttk.Label(frame, text=label_text).grid(
+                row=r, column=0, sticky="w", padx=(4, 2), pady=1
             )
-            ttk.Label(
-                frame,
-                textvariable=var,
-                anchor="w",
-                wraplength=DETAILS_WRAP_LENGTH,
-                justify="left",
-            ).grid(
-                row=r,
-                column=1,
-                sticky="nw",
-                padx=DETAILS_VALUE_PADX,
-                pady=DETAILS_ROW_PADY,
+            ttk.Label(frame, textvariable=var).grid(
+                row=r, column=1, sticky="w", padx=(2, 4), pady=1
             )
 
-        # Column 0: small, fixed-ish label column
-        frame.columnconfigure(0, weight=0, minsize=DETAILS_LABEL_MINSIZE)
-        # Column 1: value column that grows and wraps
-        frame.columnconfigure(1, weight=1, minsize=DETAILS_VALUE_MINSIZE)
+        # let column 1 expand to take remaining width
+        frame.columnconfigure(1, weight=1)
+
+        # Initialise with "no selection" state
+        self._clear_details_panel()
+
 
     # --- [UI|DETAILS] _wrap_friendly_uri ---------------------------------------
     def _wrap_friendly_uri(self, uri: str) -> str:
@@ -1464,137 +1525,124 @@ class App(tk.Tk):
         return common.get(p, "")
 
     # --- [UI|DETAILS] _update_details_from_tree --------------------------------
-    def _update_details_from_tree(self, tree, table_name: str) -> None:
+    def _update_details_from_tree(self, tv: "ttk.Treeview", table_name: str) -> None:
         """
-        Update the right-hand details panel from the currently selected row
-        in a Treeview.
+        Update the right-hand details panel based on the selected row in `tv`.
+
+        `table_name` is one of: "alerts", "active", "agg".
         """
-        from tkinter import ttk
+
+        from tkinter import ttk  # noqa: F401  (for type hints / completeness)
+        from monitor_core import normalize_mac
+
+        # ------------------------------------------------------------------
+        # 1) Ensure only ONE table has a highlighted row at any time
+        # ------------------------------------------------------------------
         try:
-            if not isinstance(tree, ttk.Treeview):
-                return
-            selection = tree.selection()
-            if not selection:
-                return
-            iid = selection[0]
-            cols = list(tree["columns"])
-            values = tree.item(iid, "values") or ()
-            row = {
-                col: (values[idx] if idx < len(values) else "")
-                for idx, col in enumerate(cols)
-            }
+            if table_name != "alerts" and hasattr(self, "alerts"):
+                self.alerts.selection_remove(*self.alerts.selection())
+            if table_name != "active" and hasattr(self, "tree"):
+                self.tree.selection_remove(*self.tree.selection())
+            if table_name != "agg" and hasattr(self, "agg"):
+                self.agg.selection_remove(*self.agg.selection())
         except Exception:
+            # Don't let selection issues kill the update
+            pass
+
+        # ------------------------------------------------------------------
+        # 2) Find the selected item in THIS tree
+        # ------------------------------------------------------------------
+        sel = tv.selection()
+        if not sel:
+            # Fallback to focused item if nothing is formally selected
+            focused = tv.focus()
+            if focused:
+                sel = (focused,)
+
+        # IMPORTANT: If there is still no selection, DO NOT clear the details.
+        # That way, when Active/Aggregates refresh and lose selection,
+        # the right-hand panel keeps showing the last-clicked row.
+        if not sel:
             return
 
-        # Derive common fields from the row
-        src = table_name
-        local = row.get("local", "")
-        dest  = row.get("dest", row.get("destination", ""))
-        mac   = row.get("mac", row.get("client_mac", ""))
-        vendor = row.get("vendor", "")
+        iid = sel[0]
+        values = tv.item(iid, "values") or ()
+        cols = tv["columns"] or ()
 
-        bytes_val = (
-            row.get("bytes")
-            or row.get("Total Bytes")
-            or row.get("bytes_tx")
+        # Map column IDs -> cell values, e.g. {"mac": "...", "vendor": "..."}
+        row = {col: values[idx] for idx, col in enumerate(cols) if idx < len(values)}
+
+        # ------------------------------------------------------------------
+        # 3) Extract common pieces according to table_name
+        # ------------------------------------------------------------------
+        mac_raw = row.get("mac", "") or ""
+        mac_norm = normalize_mac(mac_raw)
+
+        # Local endpoint (ip:port) – present in alerts/active, not in agg
+        local_display = row.get("local", "") or ""
+
+        # Destination / remote endpoint – column name differs
+        remote_display = row.get("dest", "") or row.get("remote", "") or ""
+
+        # "When" information differs by table
+        if table_name == "alerts":
+            when_display = row.get("time", "") or ""
+        elif table_name == "active":
+            first = row.get("first", "") or ""
+            last = row.get("last", "") or ""
+            if first and last:
+                when_display = f"{first} → {last}"
+            else:
+                when_display = first or last or ""
+        elif table_name == "agg":
+            sightings = row.get("sightings", "") or ""
+            when_display = f"{sightings} sightings" if sightings else ""
+        else:
+            when_display = ""
+
+        # Bytes / totals
+        bytes_str = row.get("bytes", "") or row.get("total", "") or ""
+
+        # Note (alerts only)
+        note = row.get("note", "") or ""
+
+        # ------------------------------------------------------------------
+        # 4) Vendor / name – use our display helper (aliases, labels, etc.)
+        # ------------------------------------------------------------------
+        local_ip = ""
+        if ":" in local_display:
+            local_ip = local_display.rsplit(":", 1)[0]
+
+        display_name = (
+            self._display_name(local_ip or None, mac_norm)
+            or row.get("vendor", "")
             or ""
         )
-        note = row.get("note", "")
 
-        # IP from local field "ip[:port]" or "ip [host]:port"
-        ip = ""
-        local_port = ""
-        if isinstance(local, str) and local:
-            # Take first token, split ip:port if present
-            base = local.split()[0]
-            parts = base.split(":", 1)
-            ip = parts[0]
-            if len(parts) == 2:
-                local_port = parts[1]
+        # ------------------------------------------------------------------
+        # 5) MAC status flags (labelled / known / laa / unknown)
+        # ------------------------------------------------------------------
+        status_key = self._vendor_status_for_mac(mac_norm)
+        if status_key == "labelled":
+            mac_flags = "Labelled host (green square)"
+        elif status_key == "known":
+            mac_flags = "Known vendor (blue square)"
+        elif status_key == "laa":
+            mac_flags = "Randomised / locally-administered MAC (orange square)"
+        else:
+            mac_flags = "Unknown / unrecognised vendor (red square)"
 
-        # Extract remote_ip and remote_port from dest string.
-        # dest comes from _fmt_dest("ip", port) for active/agg, or alert remote.
-        remote_ip = ""
-        remote_port = ""
-        if isinstance(dest, str) and dest:
-            hostpart, sep, portpart = dest.rpartition(":")
-            if sep:  # rpartition found a colon
-                remote_port = portpart.strip()
-                # hostpart may be "ip [hostname]" or just "ip"
-                remote_ip = hostpart.split()[0]
-
-        when = ""
-        if "time" in row:
-            when = row.get("time", "")
-        elif "last" in row:
-            when = row.get("last", "")
-        elif "first" in row:
-            when = row.get("first", "")
-
-        # Keep When as a single string
-        when_display = str(when)
-
-        # Friendly name / alias:
-        #  1) Custom MAC label (Edit Device Label)
-        #  2) Hostname alias for this IP (if any)
-        
-        # Name / Alias mirrors whatever the table displays in the Vendor/Host column
-        name = str(vendor)
-
-        # Connection state and over-1MB flag
-        state = ""
-        over1mb = ""
-
-        if table_name == "active":
-            # "Yes"/"No" from the >1MB? column
-            over1mb = row.get("over1mb", "")
-
-            # State column only exists in DEBUG mode; otherwise, try core.conn_map
-            state = row.get("state", "")
-            if not state:
-                try:
-                    # reconstruct key used in conn_map: (local_ip, local_port, remote_ip, remote_port)
-                    lp = int(local_port) if local_port else 0
-                    rp = int(remote_port) if remote_port else 0
-                    key = (ip, lp, remote_ip, rp)
-                    core = getattr(self, "core", None)
-                    if core is not None:
-                        rec = core.conn_map.get(key)
-                        if rec:
-                            state = str(rec.get("state", ""))
-                except Exception:
-                    pass
-
-        # Make destination wrap-friendly (dots and slashes)
-        dest_display = self._wrap_friendly_uri(dest)
-
-        # Build human-friendly remote port string (e.g. "443 (HTTPS)")
-        remote_port_display = ""
-        if remote_port:
-            desc = self._describe_port(remote_port)
-            remote_port_display = f"{remote_port} ({desc})" if desc else str(remote_port)
-
-        # Push into the StringVars
-        try:
-            self.detail_table.set(str(src).capitalize())
-            self.detail_ip.set(str(ip))
-            self.detail_mac.set(str(mac))
-            self.detail_vendor.set(str(vendor))
-            self.detail_name.set(str(name))
-            self.detail_dest.set(dest_display)
-            self.detail_bytes.set(str(bytes_val))
-            self.detail_when.set(when_display)
-            self.detail_note.set(str(note))
-
-            # New fields
-            self.detail_lport.set(str(local_port or ""))
-            self.detail_rport.set(remote_port_display)
-            self.detail_state.set(str(state or ""))
-            self.detail_over1mb.set(str(over1mb or ""))
-
-        except Exception:
-            # If details panel not yet built, ignore
-            pass
+        # ------------------------------------------------------------------
+        # 6) Push into the StringVars bound to the details panel labels
+        # ------------------------------------------------------------------
+        self.detail_mac.set(mac_norm or mac_raw or "Unknown")
+        self.detail_name.set(display_name or "Unknown / unrecognised vendor")
+        self.detail_local.set(local_display or "-")
+        self.detail_remote.set(remote_display or "-")
+        self.detail_when.set(when_display or "-")
+        self.detail_bytes.set(str(bytes_str) if bytes_str != "" else "-")
+        self.detail_note.set(note or "-")
+        self.detail_mac_flags.set(mac_flags)
 
     # --- [UI] notify ------------------------------------
     def notify(self, title, msg):
@@ -2214,8 +2262,17 @@ class App(tk.Tk):
         
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_checkbutton(
-            label="Show idle devices (no traffic)", variable=self.show_idle_var, command=self._on_toggle_show_idle,)
-        
+            label="Show idle devices (no traffic)",
+            variable=self.show_idle_var,
+            command=self._on_toggle_show_idle,
+        )
+
+        view_menu.add_separator()
+        view_menu.add_command(
+            label="Reset column widths",
+            command=self._reset_column_widths,
+        )
+
         menubar.add_cascade(label="View", menu=view_menu)
 
         # Tools
@@ -2229,8 +2286,9 @@ class App(tk.Tk):
         tools_menu.add_separator()
         tools_menu.add_command(label="Test SSH Credentials…", command=self._on_test_ssh)
 
-        rdns_var = tk.BooleanVar(value=self.cfg.get("resolve_rdns", True))
-        tools_menu.add_checkbutton(label="Resolve rDNS", onvalue=True, offvalue=False, variable=rdns_var, command=self._toggle_rdns)
+        # rDNS toggle (default ON unless config says otherwise)
+        self._rdns_var = tk.BooleanVar(value=bool(self.cfg.get("resolve_rdns", RESOLVE_RDNS)))
+        tools_menu.add_checkbutton(label="Resolve rDNS",variable=self._rdns_var,onvalue=True,offvalue=False,command=self._toggle_rdns,)
         
         conntrack_var = tk.BooleanVar(value=self.cfg.get("enable_conntrack_ssh", ENABLE_CONNTRACK_SSH))
         tools_menu.add_checkbutton(label="Use conntrack SSH collector", variable=conntrack_var, command=self._toggle_conntrack_ssh,)
@@ -2723,18 +2781,35 @@ class App(tk.Tk):
         """
         Look up the current friendly label for a given MAC address.
 
-        Uses the in-memory mac_labels mapping loaded from mac_labels.json and
-        returns an empty string if no label has been assigned yet.
+        Handles both:
+          - old format: { MAC: "Label" }
+          - new format: { MAC: { "label": "Label" } }
+
+        Returns an empty string if no label has been assigned yet.
         """
         
         if not mac:
             return ""
+
         try:
             self._ensure_mac_labels_loaded()
         except Exception:
-            pass
+            # If loading fails, just behave as "no labels"
+            return ""
+
         d = getattr(self, "_mac_labels", None) or {}
-        return d.get(mac.upper(), "")
+        entry = d.get(mac.upper())
+
+        # New format: { "label": "Lee's Laptop" }
+        if isinstance(entry, dict):
+            return (entry.get("label") or "").strip()
+
+        # Old format: "Lee's Laptop"
+        if isinstance(entry, str):
+            return entry.strip()
+
+        # Anything else / not found
+        return ""
 
     # --- [UI|VENDOR STATUS ICONS] ---------------------------------------
     def _init_vendor_status_icons(self) -> None:
@@ -2772,71 +2847,99 @@ class App(tk.Tk):
             "unknown":  _square(COLOR_VENDOR_UNKNOWN),
         }
 
-
-    # --- [UI|VENDOR STATUS] -----------------------------------------------
+    # --- [UI|VENDOR STATUS CLASSIFIER] _vendor_status_for_mac -----------
     def _vendor_status_for_mac(self, mac: str | None) -> str:
         """
-        Map MAC → one of: 'labelled', 'known', 'laa', 'unknown'.
+        Return one of: 'labelled', 'known', 'laa', 'unknown'.
 
-        - labelled : MAC has a user label in mac_labels.json
-        - laa      : locally-administered / randomized MAC address
-        - known    : no label/LAA, but vendor lookup != Unknown
-        - unknown  : empty/zero/randomised/unknown vendor
+        'labelled' means:
+          - there is a MAC label in local_mac_labels.json, OR
+          - any IP that has a Hostname Alias currently maps to this MAC.
+
+        'known' / 'laa' / 'unknown' come from vendor_resolver.
         """
-        from vendor_resolver import vendor_for_mac, _is_locally_administered as _is_locally_admin
-        # (Path import kept only so linters don't whinge if used elsewhere)
-        from pathlib import Path  # noqa: F401
+        from vendor_resolver import vendor_for_mac, _is_locally_administered
 
-        mac_norm = normalize_mac(mac or "")
-        if not mac_norm:
+        # Normalise MAC using our local helper from this module
+        mac_norm = _normalize_mac(mac or "")
+        if not mac_norm or mac_norm == "00:00:00:00:00:00":
             return "unknown"
 
-        # 1) User label?
+        # ------------------------------------------------------------------
+        # 1) MAC labels (local_mac_labels.json) → 'labelled' (green)
+        # ------------------------------------------------------------------
         try:
-            self._ensure_mac_labels_loaded()
-            labels = getattr(self, "_mac_labels", {}) or {}
-            if labels.get(mac_norm):
+            # Small cache so we don't re-read file every time
+            label_map = getattr(self, "_mac_labels_cache", None)
+            if label_map is None:
+                label_map = load_mac_labels()   # local function in this file
+                self._mac_labels_cache = label_map
+
+            entry = label_map.get(mac_norm)
+            label_str: str = ""
+            if isinstance(entry, dict):
+                # New format: { "AA:BB:...": {"label": "My Laptop"} }
+                label_str = (entry.get("label") or "").strip()
+            elif entry is not None:
+                # Backwards-compatible: { "AA:BB:...": "My Laptop" }
+                label_str = str(entry).strip()
+
+            if label_str:
                 return "labelled"
         except Exception:
-            # If anything goes wrong, fall back to other heuristics
+            # Never let label logic break the app
             pass
 
-        # 2) Locally-administered / randomized?
-        #    This checks the "locally administered" bit of the MAC.
+        # ------------------------------------------------------------------
+        # 2) Hostname aliases (local_ip_labels.json) → 'labelled'
+        #    (hostname alias present, even if there is no MAC label)
+        # ------------------------------------------------------------------
         try:
-            if _is_locally_admin(mac_norm):
-                return "laa"
+            core = getattr(self, "core", None)
+            if core is not None:
+                ip2mac = getattr(core, "ip2mac", {}) or {}
+                aliases = _HOSTNAMES.aliases()  # { ip: alias_name }
+                if isinstance(aliases, dict):
+                    for ip, alias_name in aliases.items():
+                        if not alias_name:
+                            continue  # skip blank aliases
+                        mac_for_ip = ip2mac.get(ip)
+                        if mac_for_ip and _normalize_mac(mac_for_ip) == mac_norm:
+                            return "labelled"
         except Exception:
-            # Don't let resolver issues kill the UI
+            # Never let alias logic break the app
             pass
 
-        # 3) Vendor lookup via unified resolver
+        # ------------------------------------------------------------------
+        # 3) Fallback: vendor-based classification
+        # ------------------------------------------------------------------
         try:
-            vendor = vendor_for_mac(mac_norm)
+            vendor_name = vendor_for_mac(mac_norm) or ""
         except Exception:
-            vendor = ""
+            vendor_name = ""
 
-        v = (vendor or "").strip().lower()
-
-        # Some resolvers might encode this in the text too – just in case.
-        if "locally administered" in v or "randomized" in v or " laa" in v:
+        # Locally-administered bit set → probably randomised / LAA
+        if _is_locally_administered(mac_norm):
             return "laa"
 
-        if v and v not in {"unknown", "locally administered (randomized)"}:
+        # Vendor name present → known
+        if vendor_name.strip():
             return "known"
 
+        # Nothing else matched → unknown
         return "unknown"
 
-
-    # --- [UI|VENDOR STATUS ICON LOOKUP] -----------------------------------
+    # --- [UI|VENDOR STATUS ICON LOOKUP] _status_icon_for_mac ---------------
     def _status_icon_for_mac(self, mac: str | None) -> tk.PhotoImage | None:
         """
         Return the tk.PhotoImage for the given MAC's vendor status.
+
         Safe to call even before _init_vendor_status_icons (returns None).
         """
         icons = getattr(self, "_status_icons", None)
         if not icons:
             return None
+
         key = self._vendor_status_for_mac(mac)
         return icons.get(key)
 
@@ -2986,12 +3089,15 @@ class App(tk.Tk):
         else:
             self._mac_labels.pop(mac, None)
 
-        # Persist updated map
+        # Persist updated map AND refresh status-icon cache
         try:
             save_mac_labels(self._mac_labels)
+            # Keep the cache in sync so colours update immediately
+            self._mac_labels_cache = dict(self._mac_labels)
         except Exception:
             # Don't crash the UI if write fails
             pass
+
 
     # --- [UI] _set_status ------------------------------------
     def _set_status(self, msg: str):
@@ -3649,18 +3755,28 @@ class App(tk.Tk):
 
     # --- [UI] _toggle_rdns --------------------------------------
     def _toggle_rdns(self):
-        # Flip the flag in memory
-        new_val = not bool(self.cfg.get("resolve_rdns", True))
+        """
+        Toggle reverse-DNS resolution based on the Tools → Resolve rDNS checkbutton.
+
+        The BooleanVar on the menu (self._rdns_var) is the source of truth:
+        - update self.cfg["resolve_rdns"]
+        - push into global RESOLVE_RDNS (used by the worker + refresh_* calls)
+        - persist to config.json
+        """
+        # Read the state from the menu's BooleanVar; default to True if missing.
+        try:
+            new_val = bool(self._rdns_var.get())
+        except Exception:
+            new_val = True
+
+        # Update config + globals
         self.cfg["resolve_rdns"] = new_val
-    
-        # Persist to config.json
         self.save_config()
-    
-        # Apply to global used by DNS worker
+
         global RESOLVE_RDNS
         RESOLVE_RDNS = new_val
-    
-        # Tell the user
+
+        # Status line feedback
         self._set_status(f"rDNS {'ON' if RESOLVE_RDNS else 'OFF'}")
 
     # --- [UI|REFRESH] _refresh_ui ----------------------------------------------
@@ -4158,79 +4274,101 @@ class App(tk.Tk):
 
         self._copy_to_clipboard("\n".join(parts), "Debug bundle copied")
 
-    # --- [UI|DEVICE NAME] _display_name ------------------------------------
-    def _display_name(self, ip: str | None, mac: str | None, vendor: str | None = None) -> str:
+    # --- [UI|TEXT] _display_name ----------------------------------------------
+    def _display_name(self, local_ip: str | None, mac: str | None, vendor: str | None = None) -> str:
         """
-        Unified friendly name builder.
-
-        Rules:
-        - If user-defined label exists → show:   Label (Vendor)
-        - If no label but vendor known → show:   Vendor
-        - If randomized MAC → show:              Randomized
-        - If unknown →                           Unknown
+        Return a nice 'Vendor / Host' string for tables.
+    
+        Priority:
+          1) MAC label (from local_mac_labels.json)
+          2) Host alias for the *local* IP (local_ip_labels.json)
+          3) Vendor name (from OUI DB / overrides)
+          4) 'Unknown'
+    
+        Also handles randomized / locally-administered MACs by annotating with "(Random)".
         """
 
-        mac = (mac or "").strip().upper()
+        from vendor_resolver import _is_locally_administered, vendor_for_mac
+        from vendor_resolver import _normalize_mac as normalize_mac
+
+        mac_norm = normalize_mac(mac or "")
         vendor = (vendor or "").strip()
 
-        # 1) Try get label
+        # ------------------------------------------------------------------
+        # 1) Current MAC label (from mac_labels, via existing helper)
+        # ------------------------------------------------------------------
         label = ""
         try:
             if hasattr(self, "_get_current_label_for_mac"):
-                label = self._get_current_label_for_mac(mac) or ""
+                label = (self._get_current_label_for_mac(mac_norm) or "").strip()
         except Exception:
-            pass
+            label = ""
 
-        # 2) Vendor fallback / resolution
+        # ------------------------------------------------------------------
+        # 2) Local hostname alias (from local_ip_labels.json)
+        # ------------------------------------------------------------------
+        alias_name = ""
+        if local_ip:
+            try:
+                # _HOSTNAMES is the global _HostnameResolver(HOST_ALIAS_PATH)
+                alias_map = _HOSTNAMES.aliases()
+            except Exception:
+                alias_map = {}
+
+            if isinstance(alias_map, dict):
+                alias_name = (alias_map.get(local_ip) or "").strip()
+        # ------------------------------------------------------------------
+        # 3) Vendor lookup (if not supplied)
+        # ------------------------------------------------------------------
         if not vendor:
             try:
-                vendor = vendor_for_mac(mac) or ""
+                vendor = vendor_for_mac(mac_norm) or ""
             except Exception:
                 vendor = ""
+        vendor = vendor.strip()
+        vendor_lower = vendor.lower()
 
-        v_lower = vendor.lower()
+        # ------------------------------------------------------------------
+        # 4) Randomized / locally-administered MACs
+        # ------------------------------------------------------------------
+        is_random = False
+        try:
+            is_random = _is_locally_administered(mac_norm)
+        except Exception:
+            # Fallback: look for keywords in vendor string
+            if "locally administered" in vendor_lower or "randomized" in vendor_lower:
+                is_random = True
 
-        # 3) Handle randomized MAC case
-        if "locally administered" in v_lower or "randomized" in v_lower:
+        if is_random:
+            # Prefer label or alias, but annotate that it's random.
             if label:
                 return f"{label} (Random)"
-            return "Random"
+            if alias_name:
+                return f"{alias_name} (Random)"
+            # Fallback to whatever vendor text we have, or generic
+            return vendor or "Random"
 
-        # 4) If label exists, include vendor if available
+        # ------------------------------------------------------------------
+        # 5) Normal (non-random) MACs
+        # ------------------------------------------------------------------
+        # 5a) If we have a label, show label, with extra info in brackets if useful.
         if label:
+            # If vendor is something meaningful (not Unknown), show it.
             if vendor and vendor != "Unknown":
                 return f"{label} ({vendor})"
+            # Otherwise, use alias as context if present.
+            if alias_name:
+                return f"{label} ({alias_name})"
             return label
 
-        # 5) Vendor but no label
-        if vendor and vendor != "Unknown":
-            return vendor
+        # 5b) No label, but we have an alias → show alias, with vendor if it’s helpful.
+        if alias_name:
+            if vendor and vendor != "Unknown":
+                return f"{alias_name} ({vendor})"
+            return alias_name
 
-        # 6) Fallback
-        return "Unknown"
-
-    # --- [UI|VENDOR] _vendor_status_glyph ------------------------------------
-    def _vendor_status_glyph(self, vendor_text: str, *, is_override: bool = False):
-        """
-        Returns both:
-        - glyph_image → used by Treeview's `image=` argument
-        - glyph_key → symbolic text stored in `values` for sort/export ("L", "K", "U")
-
-        vendor_text: raw string
-        is_override: True if user-assigned label
-        """
-        v = (vendor_text or "").strip().lower()
-
-        # Manual label overrides win
-        if is_override:
-            return self.icon_labelled, "L"
-
-        # Known vendor match
-        if v and v not in ("unknown", "locally administered (randomized)"):
-            return self.icon_known, "K"
-
-        # Unknown
-        return self.icon_unknown, "U"
+        # 5c) No label, no alias → fall back to vendor or Unknown.
+        return vendor or "Unknown"
 
     # --- [UI|DEBUG] _dump_neighbors_csv ------------------------------------
     def _dump_neighbors_csv(self):
@@ -5019,13 +5157,16 @@ def vendor_for_mac(mac: str | None) -> str:
     """
     Unified vendor lookup used by the whole app.
 
-    Order of precedence:
-      1) Full MAC / OUI aliases from your overrides files (data/mac-vendor-overrides.txt, etc.)
-      2) Base mac-vendor.txt (big OUI DB)
-      3) Fallback: Unknown, with special handling for randomized MACs
+    Order of precedence (handled by VendorDB / _VENDORS):
+      1) data/mac-vendor-overrides.txt  (your custom OUIs, e.g. BE:04:DE,OPPO)
+      2) data/mac-vendor.txt            (big OUI database)
+      3) Fallback: "Unknown"
     """
+    # _VENDORS is your global VendorDB instance built at startup
     return _VENDORS.vendor_for_mac(mac or "")
+
 # Let monitor_core use the same vendor resolver
+import monitor_core
 monitor_core.vendor_for_mac = vendor_for_mac
 
 # =============================================================================

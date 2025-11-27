@@ -165,3 +165,4 @@ SNMP monitor project 2025-11-21-09-00.zip
 
 __pycache__/*.pyc
 *.zip
+.vscode/launch.json

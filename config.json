@@ -2,7 +2,7 @@
   "column_widths": {
     "active": {
       "bytes": 110,
-      "dest": 420,
+      "dest": 213,
       "first": 140,
       "last": 140,
       "local": 160,
@@ -12,31 +12,34 @@
     },
     "agg": {
       "bytes": 110,
-      "dest": 608,
-      "mac": 87,
+      "dest": 554,
+      "mac": 160,
       "sightings": 140,
-      "vendor": 207
+      "vendor": 220
     },
     "alerts": {
       "bytes": 122,
-      "dest": 326,
-      "local": 139,
-      "mac": 87,
+      "dest": 251,
+      "local": 160,
+      "mac": 160,
       "note": 139,
       "time": 140,
-      "vendor": 207
+      "vendor": 220
     }
   },
   "copy_limit_rows": 200,
   "debug_log_tail_lines": 200,
-  "details_width": 330,
+  "details_width": 277,
   "enable_conntrack_ssh": false,
   "enable_netflow_v5_collector": false,
   "enable_toasts": false,
+  "filter_hide_web": true,
+  "filter_high_volume_only": false,
+  "filter_only_unknown_laa": false,
   "poll_interval_seconds": 5,
   "resolve_rdns": true,
   "router_ip": "192.168.1.1",
   "show_idle_devices": true,
-  "window_geometry": "1536x773+192+73",
+  "window_geometry": "1536x773+2091+413",
   "window_state": "normal"
 }

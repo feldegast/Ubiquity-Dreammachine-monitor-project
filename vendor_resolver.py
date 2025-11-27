@@ -23,13 +23,12 @@ try:
 except Exception:  # pragma: no cover
     manuf_mod = None  # type: ignore
 
-
 # --- Configuration ----------------------------------------------------------
 
 # Local vendor overrides by OUI (first 3 octets, uppercase with colons)
 LOCAL_OUI_OVERRIDES = {
-    "6C:1F:F7": "Apple, Inc.",
-    "B0:F7:C4": "Ubiquiti Inc.",
+    "6C:1F:F7": "Ugreen Group Limited",
+    "B0:F7:C4": "Amazon Technologies Inc.",
     # If you want Samsung to show even though it's LAA:
     # "52:6D:8F": "Samsung Electronics",
 }

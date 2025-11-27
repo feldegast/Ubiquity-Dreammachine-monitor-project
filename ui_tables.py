@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from tkinter import ttk
     from .main import App  # or adjust import path if needed
 
-
 # Shared column width “defaults” – these mirror what you had in _build_ui
 COL_W_FIRST = 140
 COL_W_MAC   = 160
@@ -37,6 +36,41 @@ COL_W_LAST  = 140
 COL_W_BYTES = 110
 COL_W_STATUS = 32
 
+def apply_default_alerts_column_widths(tv) -> None:
+    """Apply built-in default column widths for the Alerts table."""
+    tv.column("#0",     width=COL_W_STATUS, minwidth=20, stretch=False, anchor="w")
+    tv.column("time",   width=COL_W_FIRST,  minwidth=20, stretch=False, anchor="w")
+    tv.column("mac",    width=COL_W_MAC,    minwidth=20, stretch=False, anchor="w")
+    tv.column("vendor", width=COL_W_VEND,   minwidth=20, stretch=False, anchor="w")
+    tv.column("dest",   width=COL_W_DEST,   minwidth=20, stretch=True,  anchor="w")
+    tv.column("local",  width=COL_W_LOCAL,  minwidth=20, stretch=False, anchor="e")
+    tv.column("bytes",  width=COL_W_BYTES,  minwidth=20, stretch=False, anchor="e")
+    tv.column("note",   width=180,          minwidth=20, stretch=False, anchor="w")
+
+
+def apply_default_active_column_widths(tv, debug_enabled: bool) -> None:
+    """Apply built-in default column widths for the Active Connections table."""
+    tv.column("#0",      width=COL_W_STATUS, minwidth=20,  stretch=False, anchor="w")
+    tv.column("first",   width=COL_W_FIRST,  minwidth=20,  stretch=False, anchor="w")
+    tv.column("mac",     width=COL_W_MAC,    minwidth=20,  stretch=False, anchor="w")
+    tv.column("vendor",  width=COL_W_VEND,   minwidth=20,  stretch=False, anchor="w")
+    tv.column("dest",    width=COL_W_DEST,   minwidth=20,  stretch=True,  anchor="w")
+    tv.column("local",   width=COL_W_LOCAL,  minwidth=20,  stretch=False, anchor="e")
+    tv.column("last",    width=COL_W_LAST,   minwidth=20,  stretch=False, anchor="w")
+    tv.column("bytes",   width=COL_W_BYTES,  minwidth=20,  stretch=False, anchor="e")
+    tv.column("over1mb", width=70,           minwidth=20,  stretch=False, anchor="center")
+    if debug_enabled:
+        tv.column("state", width=110, minwidth=80, stretch=False, anchor="center")
+
+
+def apply_default_aggregates_column_widths(tv) -> None:
+    """Apply built-in default column widths for the Aggregates table."""
+    tv.column("#0",        width=COL_W_STATUS, minwidth=20,  stretch=False, anchor="w")
+    tv.column("sightings", width=COL_W_FIRST,  minwidth=20,  stretch=False, anchor="e")
+    tv.column("mac",       width=COL_W_MAC,    minwidth=20,  stretch=False, anchor="w")
+    tv.column("vendor",    width=COL_W_VEND,   minwidth=20,  stretch=False, anchor="w")
+    tv.column("dest",      width=COL_W_DEST,   minwidth=20,  stretch=True,  anchor="w")
+    tv.column("bytes",     width=COL_W_BYTES,  minwidth=20,  stretch=False, anchor="e")
 
 def _force_headings(tv, labels: dict[str, str]) -> None:
     """
@@ -59,13 +93,13 @@ def _force_headings(tv, labels: dict[str, str]) -> None:
 
 
 # =============================================================================
-# SECTION: AALERTS TABLE (top table)
+# SECTION: BUILD AALERTS TABLE (top table)
 # =============================================================================
-# region AALERTS TABLE (top table)
+# region BUILD AALERTS TABLE (top table)
 
 def build_alerts_section(app, parent: "tk.Frame") -> None:
     """
-    Build the Alerts section (filter row, legend, title, treeview + scrollbar)
+    Build the Alerts section (filter rows, legend, title, treeview + scrollbar)
     inside `parent`.
 
     Attaches the Treeview to `app.alerts` and the title var to `app.alerts_title`.
@@ -74,14 +108,37 @@ def build_alerts_section(app, parent: "tk.Frame") -> None:
     import tkinter as tk
     from tkinter import ttk
 
-    # --- Filter row + legend ------------------------------------------------
-    filter_row = ttk.Frame(parent)
-    filter_row.pack(fill="x", pady=(4, 0))
+     # =============================================================================
+    # Filter rows + legend area
+    # =============================================================================
+    # region Filter row
 
-    ttk.Label(filter_row, text="Filter (all tables):").pack(side="left")
+    top = ttk.Frame(parent)
+    top.pack(fill="x", pady=(4, 0))
+
+    # Two horizontal rows
+    top_row = ttk.Frame(top)
+    top_row.pack(fill="x")
+    bottom_row = ttk.Frame(top)
+    bottom_row.pack(fill="x", pady=(2, 0))
+
+    # Left side (filters)
+    top_left = ttk.Frame(top_row)
+    top_left.pack(side="left", fill="x", expand=True)
+    bottom_left = ttk.Frame(bottom_row)
+    bottom_left.pack(side="left", fill="x", expand=True)
+
+    # Right side (legend rows)
+    top_right = ttk.Frame(top_row)
+    top_right.pack(side="right")
+    bottom_right = ttk.Frame(bottom_row)
+    bottom_right.pack(side="right")
+
+    # --- Filter text (top-left row) ----------------------------------------
+    ttk.Label(top_left, text="Filter (all tables):").pack(side="left")
 
     app.alert_filter_var = tk.StringVar()
-    entry = ttk.Entry(filter_row, textvariable=app.alert_filter_var, width=30)
+    entry = ttk.Entry(top_left, textvariable=app.alert_filter_var, width=30)
     entry.pack(side="left", padx=(4, 8))
 
     # live filtering as the user types (global across all tables)
@@ -90,61 +147,127 @@ def build_alerts_section(app, parent: "tk.Frame") -> None:
     )
 
     ttk.Button(
-        filter_row,
+        top_left,
         text="Clear",
         command=lambda: app.alert_filter_var.set(""),
     ).pack(side="left")
 
-    # Legend for row highlight colours (right-aligned, next to details)
-    legend = ttk.Frame(filter_row)
-    legend.pack(side="right")
+    # --- Persisted filter checkboxes (bottom-left row) ----------------------
+    cfg = getattr(app, "cfg", {}) or {}
 
-    def _legend_item(parent, color: str, text: str) -> None:
-        swatch = tk.Label(
-            parent,
-            width=2,
-            background=color,
-            borderwidth=1,
-            relief="solid",
-        )
-        swatch.pack(side="left", padx=(0, 2))
-        ttk.Label(parent, text=text).pack(side="left", padx=(0, 8))
+    hide_default = bool(cfg.get("filter_hide_web", False))
+    only_unknown_default = bool(cfg.get("filter_only_unknown_laa", False))
+    high_volume_default = bool(cfg.get("filter_high_volume_only", False))
 
-    # Colours come from main.py constants
+    app.hide_web_var = getattr(
+        app, "hide_web_var", tk.BooleanVar(value=hide_default)
+    )
+    app.only_unknown_laa_var = getattr(
+        app, "only_unknown_laa_var", tk.BooleanVar(value=only_unknown_default)
+    )
+    app.high_volume_only_var = getattr(
+        app, "high_volume_only_var", tk.BooleanVar(value=high_volume_default)
+    )
+
+    def _on_filter_toggle() -> None:
+        """Persist filter checkboxes to config.json and refresh UI."""
+        cfg_local = getattr(app, "cfg", None)
+        if not isinstance(cfg_local, dict):
+            return
+        cfg_local.setdefault("column_widths", {})  # keep shape sane
+        cfg_local["filter_hide_web"] = bool(app.hide_web_var.get())
+        cfg_local["filter_only_unknown_laa"] = bool(app.only_unknown_laa_var.get())
+        cfg_local["filter_high_volume_only"] = bool(app.high_volume_only_var.get())
+        try:
+            app.save_config()
+        except Exception:
+            pass
+
+        # Rebuild the tables with the new filters
+        if hasattr(app, "_refresh_ui"):
+            app._refresh_ui()
+
+    ttk.Checkbutton(
+        bottom_left,
+        text="Hide web (80/443)",
+        variable=app.hide_web_var,
+        command=_on_filter_toggle,
+    ).pack(side="left", padx=(0, 8))
+
+    ttk.Checkbutton(
+        bottom_left,
+        text="Only unknown/LAA",
+        variable=app.only_unknown_laa_var,
+        command=_on_filter_toggle,
+    ).pack(side="left", padx=(0, 8))
+
+    ttk.Checkbutton(
+        bottom_left,
+        text="High volume only (≥ 1 MB)",
+        variable=app.high_volume_only_var,
+        command=_on_filter_toggle,
+    ).pack(side="left", padx=(0, 8))
+
+    # endregion Filter row
+
+    # =============================================================================
+    # Legend block (two rows, aligned to the right of the filters)
+    # =============================================================================
+    # region Legend block (two rows, own area)
+
+    # Colours come from ui_theme constants
     from ui_theme import (
         NEW_DEVICE_BACKGROUND,
         UNKNOWN_VENDOR_BACKGROUND,
         HIGH_VOLUME_BACKGROUND,
-        STATUS_ICON_SIZE,
+        STATUS_ICON_SIZE,           # not used here but kept imported if needed
         COLOR_VENDOR_LABELLED,
         COLOR_VENDOR_KNOWN,
         COLOR_VENDOR_UNKNOWN,
         COLOR_VENDOR_LAA,
     )
+
+    # Top row: the row-highlight colours
+    def make_legend_item(parent, color, text):
+        f = ttk.Frame(parent)
+        swatch = tk.Label(
+            f,
+            width=2,
+            height=1,
+            background=color,
+            borderwidth=1,
+            relief="solid",
+        )
+        swatch.pack(side="left", padx=(0, 4))
+        ttk.Label(f, text=text).pack(side="left")
+        return f
+
+    # Top legend row – aligned with the search bar
+    row1_items = [
+        make_legend_item(top_right, NEW_DEVICE_BACKGROUND, "New device"),
+        make_legend_item(top_right, UNKNOWN_VENDOR_BACKGROUND, "Unknown / randomised"),
+        make_legend_item(top_right, HIGH_VOLUME_BACKGROUND, "High volume (≥ 1 MB)"),
+        make_legend_item(top_right, COLOR_VENDOR_LABELLED, "Labelled host"),
+    ]
+    for col, item in enumerate(row1_items):
+        item.grid(row=0, column=col, padx=4, pady=1, sticky="w")
+
+    # Bottom legend row – aligned with the checkboxes
+    row2_items = [
+        make_legend_item(bottom_right, COLOR_VENDOR_KNOWN, "Known vendor"),
+        make_legend_item(bottom_right, COLOR_VENDOR_LAA, "Randomised / LAA"),
+        make_legend_item(bottom_right, COLOR_VENDOR_UNKNOWN, "Unknown vendor"),
+    ]
+    for col, item in enumerate(row2_items):
+        item.grid(row=0, column=col, padx=4, pady=1, sticky="w")
+
+    # region Legend block (two rows, own area)
     
-    '''
-    NEW_DEVICE_BACKGROUND     = "#F7FFD2"
-    UNKNOWN_VENDOR_BACKGROUND = "#FFECEC"
-    HIGH_VOLUME_BACKGROUND    = "#D2F5FF"
+    # =============================================================================
+    # Alerts title
+    # =============================================================================
+    # region Alerts title
 
-
-    COLOR_VENDOR_LABELLED = "#00C000"
-    COLOR_VENDOR_KNOWN    = "#0077FF"
-    COLOR_VENDOR_UNKNOWN  = "#C00000"
-    '''
-    _legend_item(legend, NEW_DEVICE_BACKGROUND, "New device")
-    _legend_item(legend, UNKNOWN_VENDOR_BACKGROUND, "Unknown / randomised")
-    _legend_item(legend, HIGH_VOLUME_BACKGROUND, "High volume (≥ 1 MB)")
-
-    # Status icon legend (same style as row highlights)
-    _legend_item(legend, COLOR_VENDOR_LABELLED, "Labelled host")
-    _legend_item(legend, COLOR_VENDOR_KNOWN,    "Known vendor")
-    _legend_item(legend, COLOR_VENDOR_LAA,      "Randomized / LAA")
-    _legend_item(legend, COLOR_VENDOR_UNKNOWN,  "Unknown vendor")
-    
-
-
-    # --- Alerts title -------------------------------------------------------
     app.alerts_title = tk.StringVar(value="Alerts")
     ttk.Label(
         parent,
@@ -152,8 +275,14 @@ def build_alerts_section(app, parent: "tk.Frame") -> None:
         anchor="w",
         font=("Segoe UI", 10, "bold"),
     ).pack(side="top", anchor="w", pady=(2, 0))
+    
+    # endregion Legend block (two rows, own area)
+    
+    # =============================================================================
+    # SECTION: Treeview + scrollbar
+    # =============================================================================
+    # region Treeview + scrollbar
 
-    # --- Treeview + scrollbar ----------------------------------------------
     alertf = ttk.Frame(parent)
     alertf.pack(fill="both", expand=True)
 
@@ -220,9 +349,13 @@ def build_alerts_section(app, parent: "tk.Frame") -> None:
         lambda e: app._update_details_from_tree(app.alerts, "alerts"),
     )
 
-# ---------------------------------------------------------------------------
-# REFRESH: ALERTS TABLE (top)
-# ---------------------------------------------------------------------------
+    # endregion Treeview + scrollbar
+# endregion BUILD AALERTS TABLE (top table)
+
+# =============================================================================
+# SECTION: REFRESH: ALERTS TABLE (to tablep)
+# =============================================================================
+# region REFRESH: ALERTS TABLE (to tablep)
 
 def refresh_alerts_table(app, *, toaster=None) -> None:
     """
@@ -243,13 +376,19 @@ def refresh_alerts_table(app, *, toaster=None) -> None:
             alert = core.alert_q.get_nowait()
 
             # Compute a vendor/label for the local endpoint’s MAC/IP
-            local_hostport = alert.get("local", "")
+            local_hostport = alert.get("local", "") or ""
             local_ip = local_hostport.rsplit(":", 1)[0] if ":" in local_hostport else ""
             mac_norm = normalize_mac(alert.get("mac", "") or "")
             vendor_disp = app._display_name(local_ip, mac_norm)
 
+            # Apply hostname aliases / rDNS to the "Local" column
+            if hasattr(app, "_display_local"):
+                local_display = app._display_local(local_hostport)
+            else:
+                local_display = local_hostport
+
             # Destination: either "ip [hostname]:port" or "ip:port"
-            remote_txt = alert.get("remote", "")
+            remote_txt = alert.get("remote", "") or ""
             if alert.get("hostname"):
                 dest_text = f'{remote_txt} [{alert["hostname"]}]'
             else:
@@ -275,7 +414,7 @@ def refresh_alerts_table(app, *, toaster=None) -> None:
                     alert.get("mac", ""),    # MAC
                     vendor_text,             # Vendor/Host
                     dest_text,               # Destination
-                    local_hostport,          # Local
+                    local_display,           # Local (with alias if known)
                     bytes_val,               # Bytes (TX)
                     alert.get("note", ""),   # Note
                 ),
@@ -312,12 +451,13 @@ def refresh_alerts_table(app, *, toaster=None) -> None:
                 apply_filter()
     except Exception:
         pass
-# endregion AALERTS TABLE (top table)
+
+# endregion REFRESH: ALERTS TABLE (to tablep)
 
 # =============================================================================
-# SECTION: ACTIVE CONNECTIONS TABLE (middle table)
+# SECTION: BUILD ACTIVE CONNECTIONS TABLE (middle table)
 # =============================================================================
-# region ACTIVE CONNECTIONS TABLE (middle table)
+# region BUILD ACTIVE CONNECTIONS TABLE (middle table)
 
 def build_active_section(app, parent: "tk.Frame") -> None:
     """
@@ -367,19 +507,8 @@ def build_active_section(app, parent: "tk.Frame") -> None:
     for col, label in active_labels.items():
         app.tree.heading(col, text=label, anchor="center")
 
-    # #0 = status icon column
-    app.tree.column("#0",      width=COL_W_STATUS, minwidth=20,  stretch=False, anchor="w")
-    app.tree.column("first",   width=COL_W_FIRST,  minwidth=20,  stretch=False, anchor="w")
-    app.tree.column("mac",     width=COL_W_MAC,    minwidth=20,  stretch=False, anchor="w")
-    app.tree.column("vendor",  width=COL_W_VEND,   minwidth=20,  stretch=False, anchor="w")
-    app.tree.column("dest",    width=COL_W_DEST,   minwidth=20,  stretch=True,  anchor="w")
-    app.tree.column("local",   width=COL_W_LOCAL,  minwidth=20,  stretch=False, anchor="e")
-    app.tree.column("last",    width=COL_W_LAST,   minwidth=20,  stretch=False, anchor="w")
-    app.tree.column("bytes",   width=COL_W_BYTES,  minwidth=20,  stretch=False, anchor="e")
-    app.tree.column("over1mb", width=70,           minwidth=20,  stretch=False, anchor="center")
-
-    if DEBUG:
-        app.tree.column("state", width=110, minwidth=80, stretch=False, anchor="center")
+    # Apply default widths via helper
+    apply_default_active_column_widths(app.tree, DEBUG)
 
     # Sorting
     app._setup_sorting(app.tree, table_name="active", default_col="last", default_reverse=True)
@@ -406,9 +535,12 @@ def build_active_section(app, parent: "tk.Frame") -> None:
         lambda e: app._update_details_from_tree(app.tree, "active"),
     )
 
-# ---------------------------------------------------------------------------
-# REFRESH: ACTIVE CONNECTIONS TABLE (middle)
-# ---------------------------------------------------------------------------
+# endregion BUILD ACTIVE CONNECTIONS TABLE (middle table)
+
+# =============================================================================
+# SECTION: REFRESH: ACTIVE CONNECTIONS TABLE (middle table)
+# =============================================================================
+# region REFRESH: ACTIVE CONNECTIONS TABLE (middle table)
 
 def refresh_active_table(
     app,
@@ -425,8 +557,21 @@ def refresh_active_table(
     - Queues rDNS lookups via app._dns_q
     - Applies row tags and status icons
     """
+    from main import ALERT_THRESHOLD_BYTES, DEBUG
+
     core = app.core
     tree = app.tree
+
+    # Global filter toggles
+    hide_web = bool(getattr(app, "hide_web_var", None) and app.hide_web_var.get())
+    only_unknown_laa = bool(
+        getattr(app, "only_unknown_laa_var", None)
+        and app.only_unknown_laa_var.get()
+    )
+    high_volume_only = bool(
+        getattr(app, "high_volume_only_var", None)
+        and app.high_volume_only_var.get()
+    )
 
     # Clear existing rows
     tree.delete(*tree.get_children())
@@ -448,7 +593,16 @@ def refresh_active_table(
         remote_ip = rec["remote_ip"]
         remote_port = rec["remote_port"]
 
-        # rDNS queuing
+        # Port-based filter: optionally hide common web ports
+        try:
+            port_int = int(remote_port)
+        except Exception:
+            port_int = None
+
+        if hide_web and port_int in (80, 443, 8080, 8443):
+            continue
+
+        # rDNS queuing for remote endpoint
         if resolve_rdns and remote_ip not in ("0.0.0.0", "127.0.0.1"):
             with dns_lock:
                 cached = dns_cache.get(remote_ip)
@@ -461,12 +615,32 @@ def refresh_active_table(
                 except Exception:
                     pass
 
+        # Destination column: ip [hostname]:port if we have rDNS, else ip:port
         dest_text = _fmt_dest(remote_ip, remote_port, dns_lock, dns_cache)
+
         local_hp = f'{rec["local_ip"]}:{rec["local_port"]}'
+
+        # Apply hostname alias / rDNS to Local column
+        if hasattr(app, "_display_local"):
+            local_display = app._display_local(local_hp)
+        else:
+            local_display = local_hp
+
         mac_norm = normalize_mac(rec.get("local_mac") or "")
         vendor_disp = app._display_name(rec.get("local_ip"), mac_norm)
 
+        # Status-level filter: only unknown/LAA devices if requested
+        if only_unknown_laa:
+            status_key = app._vendor_status_for_mac(mac_norm)
+            if status_key not in ("unknown", "laa"):
+                continue
+
         bytes_val = int(rec.get("bytes_tx") or 0)
+
+        # Low-volume filter: drop rows below threshold when enabled
+        if high_volume_only and bytes_val < ALERT_THRESHOLD_BYTES:
+            continue
+
         vendor_text = vendor_disp or ""
 
         # "New" flow heuristic: first_seen == last_seen (just created session)
@@ -475,19 +649,20 @@ def refresh_active_table(
         tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
         status_img = app._status_icon_for_mac(mac_norm)
 
+        over_1mb = bytes_val >= ALERT_THRESHOLD_BYTES
+
         row_vals = [
-            rec.get("first_seen", ""),               # First Seen
-            rec.get("local_mac", ""),                # MAC
-            vendor_text,                             # Vendor/Host
-            dest_text,                               # Destination
-            local_hp,                                # Local
-            rec.get("last_seen", ""),                # Last Seen
-            bytes_val,                               # Bytes (TX)
-            "Yes" if rec.get("over_1mb") else "No",  # >1MB?
+            rec.get("first_seen", ""),        # First Seen
+            rec.get("local_mac", ""),         # MAC
+            vendor_text,                      # Vendor/Host
+            dest_text,                        # Destination (ip [hostname]:port)
+            local_display,                    # Local (with alias if known)
+            rec.get("last_seen", ""),         # Last Seen
+            bytes_val,                        # Bytes (TX)
+            "Yes" if over_1mb else "No",      # >1MB?
         ]
 
         # Optional DEBUG state column
-        from main import DEBUG  # if you still keep DEBUG there
         if DEBUG:
             row_vals.append(str(rec.get("state", "")).lower())
 
@@ -496,16 +671,17 @@ def refresh_active_table(
             "end",
             text="",          # status column text
             image=status_img, # coloured square
-            values=tuple(row_vals),
+            values=row_vals,
             tags=tags,
         )
 
-# endregion ACTIVE CONNECTIONS TABLE (middle table)
+
+# endregion REFRESH: ACTIVE CONNECTIONS TABLE (middle table)
 
 # =============================================================================
-# SECTION: AGGREGATES TABLE (middle table) (bottom table)
+# SECTION: BUILD AGGREGATES TABLE (bottom table)
 # =============================================================================
-# region: AGGREGATES TABLE (bottom table)
+# region BUILD AGGREGATES TABLE (bottom table)
 
 def build_aggregates_section(app, parent: "tk.Frame") -> None:
     """
@@ -558,13 +734,8 @@ def build_aggregates_section(app, parent: "tk.Frame") -> None:
         HIGH_VOLUME_BACKGROUND,
     )
 
-    # #0 = status icon
-    app.agg.column("#0",        width=COL_W_STATUS, minwidth=20,  stretch=False, anchor="w")
-    app.agg.column("sightings", width=COL_W_FIRST,  minwidth=20,  stretch=False, anchor="e")
-    app.agg.column("mac",       width=COL_W_MAC,    minwidth=20,  stretch=False, anchor="w")
-    app.agg.column("vendor",    width=COL_W_VEND,   minwidth=20,  stretch=False, anchor="w")
-    app.agg.column("dest",      width=COL_W_DEST,   minwidth=20,  stretch=True,  anchor="w")
-    app.agg.column("bytes",     width=COL_W_BYTES,  minwidth=20,  stretch=False, anchor="e")
+    # Apply default widths via helper
+    apply_default_aggregates_column_widths(app.agg)
 
     # Row colour tags
     app.agg.tag_configure("unknown_vendor", background=UNKNOWN_VENDOR_BACKGROUND)
@@ -592,9 +763,12 @@ def build_aggregates_section(app, parent: "tk.Frame") -> None:
         lambda e: app._update_details_from_tree(app.agg, "agg"),
     )
 
-# ---------------------------------------------------------------------------
-# REFRESH: AGGREGATES TABLE (bottom)
-# ---------------------------------------------------------------------------
+# endregion BUILD AGGREGATES TABLE (bottom table)
+
+# =============================================================================
+# SECTION: REFRESH: AGGREGATES TABLE (bottom table)
+# =============================================================================
+# region REFRESH: AGGREGATES TABLE (bottom table)
 
 def refresh_aggregates_table(
     app,
@@ -607,13 +781,30 @@ def refresh_aggregates_table(
     """
     Rebuild the Aggregates table (app.agg) from core.aggregates + ARP cache.
 
-    - Shows per-MAC destinations with total bytes and sightings
-    - Applies row tags and status icons
-    - Queues rDNS for aggregate destinations
+    NEW BEHAVIOUR:
+      - One row per MAC (device), not per (MAC, destination)
+      - Sightings = total sightings across all destinations for that MAC
+      - Bytes     = total bytes across all destinations for that MAC
+      - Dest      = top-talkers summary:
+                      "ip [hostname]:port" if single destination
+                      "ip [hostname]:port (+N more)" if multiple
     """
+    from main import ALERT_THRESHOLD_BYTES
+
     core = app.core
     agg_tv = app.agg
 
+    hide_web = bool(getattr(app, "hide_web_var", None) and app.hide_web_var.get())
+    only_unknown_laa = bool(
+        getattr(app, "only_unknown_laa_var", None)
+        and app.only_unknown_laa_var.get()
+    )
+    high_volume_only = bool(
+        getattr(app, "high_volume_only_var", None)
+        and app.high_volume_only_var.get()
+    )
+
+    # Clear existing rows
     agg_tv.delete(*agg_tv.get_children())
 
     # 1) MACs discovered via ARP (devices present on LAN)
@@ -625,21 +816,88 @@ def refresh_aggregates_table(
     # 3) Union = all devices we know about
     all_macs = macs_from_arp | macs_from_aggs
 
-    for mac in sorted(all_macs):
-        mac_norm = normalize_mac(mac)
-        vendor = app._display_name(ip=None, mac=mac_norm)
-        dests = core.aggregates.get(mac, {})
+    WEB_PORTS = {80, 443, 8080, 8443}
 
-        if not dests:
-            # skip empty placeholders entirely
+    for mac in sorted(all_macs):
+        mac_norm = normalize_mac(mac or "")
+        if not mac_norm:
             continue
 
-        for (rip, rport), stats in sorted(
-            dests.items(),
-            key=lambda kv: (-int(kv[1].get("bytes", 0)), kv[0]),
-        ):
-            # queue rDNS for aggregates as well
-            if resolve_rdns and rip not in ("0.0.0.0", "127.0.0.1"):
+        dests = core.aggregates.get(mac, {})
+        if not dests:
+            # nothing to show for this MAC yet
+            continue
+
+        # =============================================================================
+        # SECTION: Aggregate stats per MAC
+        # =============================================================================
+        # region Aggregate stats per MAC
+
+        total_bytes = 0
+        total_sightings = 0
+        all_ports: set[int] = set()
+        top_dest: tuple[str, str] | None = None
+        top_bytes = -1
+
+        for (rip, rport), stats in dests.items():
+            try:
+                b = int(stats.get("bytes") or 0)
+            except Exception:
+                b = 0
+            try:
+                s = int(stats.get("sightings") or 0)
+            except Exception:
+                s = 0
+
+            total_bytes += b
+            total_sightings += s
+
+            try:
+                port_int = int(rport)
+            except Exception:
+                port_int = None
+
+            if port_int is not None:
+                all_ports.add(port_int)
+
+            if b > top_bytes:
+                top_bytes = b
+                top_dest = (rip, rport)
+
+        if not total_sightings and not total_bytes:
+            # truly empty / zero-ish device
+            continue
+
+        # endregion Aggregate stats per MAC
+        
+        # =============================================================================
+        # SECTION: Filters
+        # =============================================================================
+        # region Filters
+
+        # hide_web: skip devices whose *only* ports are common web ports
+        if hide_web and all_ports and all(p in WEB_PORTS for p in all_ports):
+            continue
+
+        # Status-level filter: only unknown/LAA devices if requested
+        if only_unknown_laa:
+            status_key = app._vendor_status_for_mac(mac_norm)
+            if status_key not in ("unknown", "laa"):
+                continue
+
+        # Low-volume filter: drop devices below threshold when enabled
+        if high_volume_only and total_bytes < ALERT_THRESHOLD_BYTES:
+            continue
+        # endregion Filters
+
+        # =============================================================================
+        # SECTION: rDNS for the “top talker” destination
+        # =============================================================================
+        # region rDNS for the “top talker” destination
+
+        if resolve_rdns and top_dest is not None:
+            rip, _rport = top_dest
+            if rip not in ("0.0.0.0", "127.0.0.1"):
                 with dns_lock:
                     cached = dns_cache.get(rip)
                     pending = rip in dns_pending
@@ -650,34 +908,51 @@ def refresh_aggregates_table(
                         app._dns_q.put_nowait(rip)
                     except Exception:
                         pass
+        # endregion rDNS for the “top talker” destination
+        
+        # =============================================================================
+        # SECTION: Display strings
+        # =============================================================================
+        # region Display strings
 
-            agg_dest = _fmt_dest(rip, rport, dns_lock, dns_cache)
+        vendor_disp = app._display_name(local_ip=None, mac=mac_norm)
+        vendor_text = vendor_disp or ""
 
-            sightings = int(stats.get("sightings") or 0)
-            bytes_val = int(stats.get("bytes") or 0)
-            vendor_text = vendor or ""
+        # Destination summary
+        if top_dest is None:
+            dest_text = ""
+        else:
+            rip, rport = top_dest
+            dest_pretty = _fmt_dest(rip, rport, dns_lock, dns_cache)
+            if len(dests) == 1:
+                dest_text = dest_pretty
+            else:
+                dest_text = f"{dest_pretty} (+{len(dests) - 1} more)"
 
-            # Heuristic: a "new" device if we’ve only seen it a couple of times
-            is_new = sightings <= 2
+        # Heuristic: "new" device if only a couple of flows
+        is_new = total_sightings <= 2
 
-            tags = _tags_for_row(vendor_text, bytes_val, is_new=is_new)
-            status_img = app._status_icon_for_mac(mac_norm)
+        tags = _tags_for_row(vendor_text, total_bytes, is_new=is_new)
+        status_img = app._status_icon_for_mac(mac_norm)
 
-            agg_tv.insert(
-                "",
-                "end",
-                text="",
-                image=status_img,
-                values=(
-                    sightings,     # Sightings
-                    mac_norm,      # MAC (normalized)
-                    vendor_text,   # Vendor/Host
-                    agg_dest,      # Destination
-                    bytes_val,     # Total Bytes
-                ),
-                tags=tags,
-            )
-# endregion AGGREGATES TABLE (bottom table)
+        agg_tv.insert(
+            "",
+            "end",
+            text="",
+            image=status_img,
+            values=(
+                total_sightings,   # Sightings (sum over all dests)
+                mac_norm,          # MAC (normalized)
+                vendor_text,       # Vendor/Host
+                dest_text,         # Top destination summary
+                total_bytes,       # Total Bytes (all dests)
+            ),
+            tags=tags,
+        )
+
+        # endregion Display strings
+
+# endregion REFRESH: AGGREGATES TABLE (bottom table)
 
 # =============================================================================
 # SECTION: SHARED HELPERS FOR REFRESH FUNCTIONS
@@ -699,8 +974,9 @@ def _tags_for_row(vendor_text: str, bytes_val: int | float, *, is_new: bool = Fa
     if not v or v == "unknown":
         tags.append("unknown_vendor")
 
+    from main import ALERT_THRESHOLD_BYTES
     try:
-        if int(bytes_val) >= 1_048_576:  # 1 MB threshold
+        if int(bytes_val) >= ALERT_THRESHOLD_BYTES:  # 1 MB threshold
             tags.append("high_volume")
     except Exception:
         pass
