@@ -1,191 +1,227 @@
-# vendor_resolver.py
 from __future__ import annotations
+
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
-# Optional deps: install with
-#   pip install mac-vendor-lookup manuf aiofiles
-#
-# This module:
-# - Normalizes MACs
-# - Uses local overrides first
-# - Optionally labels LAA ("Randomized (LAA)")
-# - Falls back: mac-vendor-lookup -> manuf -> "Unknown"
-# - Safe update of mac-vendor-lookup cache on Windows (creates ~/.cache)
+# =============================================================================
+# SECTION: VENDOR RESOLVER (MAC → Vendor/OUI lookup)
+# =============================================================================
+# region VENDOR RESOLVER
 
-try:
-    from mac_vendor_lookup import MacLookup
-except Exception:  # pragma: no cover
-    MacLookup = None  # type: ignore
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 
-try:
-    from manuf import manuf as manuf_mod
-except Exception:  # pragma: no cover
-    manuf_mod = None  # type: ignore
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 
-# --- Configuration ----------------------------------------------------------
+# Downloaded OUI database (TAB-separated)
+BASE_OUI_FILE = DATA_DIR / "mac-vendor.txt"
 
-# Local vendor overrides by OUI (first 3 octets, uppercase with colons)
-LOCAL_OUI_OVERRIDES = {
-    "6C:1F:F7": "Ugreen Group Limited",
-    "B0:F7:C4": "Amazon Technologies Inc.",
-    # If you want Samsung to show even though it's LAA:
-    # "52:6D:8F": "Samsung Electronics",
-}
+# Local overrides (CSV: OUI,Vendor Name...) – only first comma is significant
+OVERRIDE_OUI_FILE = DATA_DIR / "mac-vendor-overrides.txt"
 
-# Prefer to label LAA addresses as randomized rather than vendor name
-PREFER_LAA_LABEL = True
+# ---------------------------------------------------------------------------
+# Normalisation helpers
+# ---------------------------------------------------------------------------
 
-# What to display when no vendor is known
-UNKNOWN_LABEL = "Unknown"
+# Match two consecutive hex characters (one byte)
+_MAC_RE = re.compile(r"[0-9A-Fa-f]{2}")
 
 
-# --- Utilities --------------------------------------------------------------
+def _normalize_mac(mac: Optional[str]) -> Optional[str]:
+    """Best-effort normalisation of a MAC string.
 
-def _normalize_mac(mac: Optional[str]) -> str:
+    * Extracts hex pairs from any separator style (':', '-', '.', spaces)
+    * Upper-cases everything
+    * Returns the first 6 bytes as 'AA:BB:CC:DD:EE:FF'
+    """
     if not mac:
-        return ""
-    mac = mac.strip().upper().replace("-", ":")
-    # pad single-octet forms etc.; ensure colon-separated hex pairs
-    if ":" not in mac and len(mac) in (12, 16):  # 12 = 6 bytes, 16 = 8 bytes
-        mac = ":".join(mac[i:i+2] for i in range(0, len(mac), 2))
-    return mac
+        return None
+
+    # Grab raw hex pairs
+    hex_pairs = _MAC_RE.findall(mac)
+    if len(hex_pairs) < 3:  # need at least an OUI (3 bytes)
+        return None
+
+    # We keep up to 6 bytes – extra pairs (in weird formats) are ignored
+    pairs = [p.upper() for p in hex_pairs[:6]]
+    return ":".join(pairs)
 
 
-def _oui(mac: str) -> str:
-    parts = mac.split(":")
-    if len(parts) >= 3:
-        return ":".join(parts[:3])
-    return ""
+def normalize_mac(mac: Optional[str]) -> Optional[str]:
+    """Public wrapper so other modules can import a single normaliser."""
+    return _normalize_mac(mac)
 
 
-def _is_locally_administered(mac: str) -> bool:
-    mac = _normalize_mac(mac)
-    if len(mac) < 2 or ":" not in mac:
+def _normalize_oui(raw: str) -> Optional[str]:
+    """Normalise an OUI string to 'AA:BB:CC'.
+
+    Accepts formats like:
+      - 'D8:5E:D3'
+      - 'D8-5E-D3'
+      - 'D85ED3'
+      - 'd8:5e:d3'
+    """
+    if not raw:
+        return None
+
+    # Extract hex digits only
+    hex_digits = re.findall(r"[0-9A-Fa-f]", raw)
+    if len(hex_digits) < 6:
+        return None
+
+    # First 3 bytes (6 hex chars)
+    first_six = hex_digits[:6]
+    pairs = [
+        "".join(first_six[i : i + 2]).upper()
+        for i in range(0, 6, 2)
+    ]
+    return ":".join(pairs)
+
+
+def _oui_from_normalized_mac(mac_norm: str) -> str:
+    """Return the OUI part ('AA:BB:CC') from a normalised MAC."""
+    parts = mac_norm.split(":")
+    return ":".join(parts[:3]) if len(parts) >= 3 else mac_norm
+
+
+def _is_locally_administered(mac_norm: Optional[str]) -> bool:
+    """Return True if the MAC is locally administered (LAA).
+
+    We look at the second least significant bit of the first byte.
+    (See IEEE 802 MAC address format).
+    """
+    if not mac_norm:
         return False
+
+    first_octet = mac_norm.split(":", 1)[0]
     try:
-        first_octet = int(mac.split(":")[0], 16)
-        return (first_octet & 0x02) != 0  # LAA bit set
-    except Exception:
+        b0 = int(first_octet, 16)
+    except ValueError:
         return False
 
-
-# --- Resolver ---------------------------------------------------------------
-
-class _VendorResolver:
-    def __init__(self) -> None:
-        self._ml = None
-        if MacLookup is not None:
-            try:
-                self._ml = MacLookup()
-            except Exception:
-                self._ml = None
-
-        self._manuf = None
-        if manuf_mod is not None:
-            try:
-                self._manuf = manuf_mod.MacParser()
-            except Exception:
-                self._manuf = None
-
-    def update_now(self, silent: bool = True) -> bool:
-        """
-        Refresh mac-vendor-lookup local DB; returns True on success.
-        Creates ~/.cache on Windows if missing to avoid FileNotFoundError.
-        """
-        if self._ml is None:
-            if not silent:
-                print("[vendor] mac-vendor-lookup not available")
-            return False
-        try:
-            # Ensure cache dir exists (mac-vendor-lookup uses ~/.cache/mac-vendors.txt)
-            cache_dir = Path.home() / ".cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            # Do the update
-            self._ml.update_vendors()
-            if not silent:
-                print("[vendor] vendor DB updated")
-            return True
-        except Exception as e:
-            if not silent:
-                print(f"[vendor] update failed: {e}")
-            return False
-
-    def for_mac(self, mac: Optional[str]) -> str:
-        """
-        Return best-guess vendor for a MAC (no LAA labeling).
-        """
-        mac_n = _normalize_mac(mac)
-        if not mac_n:
-            return UNKNOWN_LABEL
-
-        # 1) Local overrides
-        oui = _oui(mac_n)
-        if oui in LOCAL_OUI_OVERRIDES:
-            return LOCAL_OUI_OVERRIDES[oui]
-
-        # 2) mac-vendor-lookup
-        if self._ml is not None:
-            try:
-                name = self._ml.lookup(mac_n)  # raises if not found
-                if name:
-                    return str(name)
-            except Exception:
-                pass
-
-        # 3) manuf fallback
-        if self._manuf is not None:
-            try:
-                name = self._manuf.get_manuf(mac_n)
-                if name:
-                    return str(name)
-            except Exception:
-                pass
-
-        return UNKNOWN_LABEL
-
-    def for_display(self, mac: Optional[str]) -> str:
-        """
-        Preferred label for UI: LAA gets 'Randomized (LAA)' if enabled, else vendor.
-        """
-        mac_n = _normalize_mac(mac)
-        if not mac_n:
-            return UNKNOWN_LABEL
-
-        if PREFER_LAA_LABEL and _is_locally_administered(mac_n):
-            return "Randomized (LAA)"
-
-        return self.for_mac(mac_n)
-
-    # --- Backwards-compat shims ------------------------------------
-    def vendor_for_mac(self, mac: str | None) -> str:
-        """Compat: old code expects a .vendor_for_mac() method."""
-        return self.for_mac(mac)
-
-    def vendor_for_display(self, mac: str | None) -> str:
-        """Compat: old code expects a .vendor_for_display() method."""
-        return self.for_display(mac)
-    
-# Singleton
-_RESOLVER = _VendorResolver()
+    return bool(b0 & 0x02)
 
 
-# --- Public API -------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Loading OUI → Vendor mappings
+# ---------------------------------------------------------------------------
 
-def update_vendor_db_now(silent: bool = True) -> bool:
-    """Call once at startup if you want to refresh the local DB."""
-    return _RESOLVER.update_now(silent=silent)
+def _load_base_ouis(path: Path) -> Dict[str, str]:
+    """Load the downloaded TAB-delimited OUI database.
+
+    Expected format per line:
+        <OUI>\t<Vendor name>
+
+    * Lines starting with '#' are ignored
+    * OUI can be either 'D8:5E:D3', 'D8-5E-D3', 'D85ED3', etc.
+    """
+    mapping: Dict[str, str] = {}
+
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+
+                raw_oui = parts[0].strip()
+                vendor = parts[1].strip()
+                if not raw_oui or not vendor:
+                    continue
+
+                oui = _normalize_oui(raw_oui)
+                if not oui:
+                    continue
+
+                mapping[oui] = vendor
+    except FileNotFoundError:
+        # It's fine – you'll just see 'Unknown' everywhere until the file exists
+        pass
+
+    return mapping
+
+
+def _load_override_ouis(path: Path) -> Dict[str, str]:
+    """Load local CSV overrides: 'OUI,Vendor Name...'.
+
+    Only the FIRST comma is treated as a separator so that vendor names
+    can contain commas, e.g.:
+
+        D8:5E:D3,GIGA-BYTE TECHNOLOGY CO., LTD.
+    """
+    mapping: Dict[str, str] = {}
+
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                # Only first comma is significant
+                if "," not in line:
+                    continue
+
+                prefix, vendor_raw = line.split(",", 1)
+                raw_oui = prefix.strip()
+                vendor = vendor_raw.strip()
+
+                if not raw_oui or not vendor:
+                    continue
+
+                oui = _normalize_oui(raw_oui)
+                if not oui:
+                    continue
+
+                mapping[oui] = vendor
+    except FileNotFoundError:
+        # Optional file – ignore if missing
+        pass
+
+    return mapping
+
+
+def _build_vendor_map() -> Dict[str, str]:
+    """Build the final OUI → Vendor mapping.
+
+    1. Load the base TAB-delimited database (mac-vendor.txt)
+    2. Apply CSV overrides from mac-vendor-overrides.txt (overrides win)
+    """
+    base = _load_base_ouis(BASE_OUI_FILE)
+    overrides = _load_override_ouis(OVERRIDE_OUI_FILE)
+
+    # Apply overrides last so they take precedence
+    base.update(overrides)
+    return base
+
+
+# Single in-memory map used by all lookups
+_VENDOR_BY_OUI: Dict[str, str] = _build_vendor_map()
 
 
 def vendor_for_mac(mac: Optional[str]) -> str:
-    """Return vendor name (no LAA labeling)."""
-    return _RESOLVER.for_mac(mac)
+    """Return the best-guess vendor name for a MAC address.
+
+    * Normalises the MAC
+    * Extracts its OUI ('AA:BB:CC')
+    * Looks up in:
+        - data/mac-vendor.txt               (TAB-delimited)
+        - data/mac-vendor-overrides.txt     (CSV, OUI,Vendor Name...)
+    * Returns 'Unknown' if nothing matches
+    """
+    mac_norm = _normalize_mac(mac)
+    if not mac_norm:
+        return "Unknown"
+
+    oui = _oui_from_normalized_mac(mac_norm)
+    return _VENDOR_BY_OUI.get(oui, "Unknown")
 
 
-def vendor_for_display(mac: Optional[str]) -> str:
-    """Return UI-preferred label (LAA shown as 'Randomized (LAA)')."""
-    return _RESOLVER.for_display(mac)
-
-
-# Back-compat: some code calls lookup_vendor(...)
-lookup_vendor = vendor_for_display
+# endregion VENDOR RESOLVER

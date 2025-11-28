@@ -2,7 +2,7 @@
   "column_widths": {
     "active": {
       "bytes": 110,
-      "dest": 213,
+      "dest": 420,
       "first": 140,
       "last": 140,
       "local": 160,
@@ -40,6 +40,6 @@
   "resolve_rdns": true,
   "router_ip": "192.168.1.1",
   "show_idle_devices": true,
-  "window_geometry": "1536x773+2091+413",
+  "window_geometry": "1536x773+192+73",
   "window_state": "normal"
 }

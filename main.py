@@ -18,14 +18,6 @@ import threading
 import time
 import webbrowser
 
-import monitor_core
-from monitor_core import (
-    MonitorCore, 
-    walk_arp_table,
-    _walk_ipnet_physical,
-    _walk_at_mib,
-    normalize_mac,
-)
 from ui_tables import (
     COL_W_FIRST,
     COL_W_MAC,
@@ -65,61 +57,117 @@ from pathlib import Path
 from typing import Iterable, Dict, Optional
 from tkinter import filedialog
 
-from vendor_resolver import update_vendor_db_now
+from vendor_resolver import _normalize_mac
 from collectors import NetflowV5Collector, ConntrackCollectorSSH
 
 # ---- Vendor lookup (optional) ----
 from mac_vendor_lookup import VendorNotFoundError
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message=r"pkg_resources is deprecated.*",
-    category=UserWarning,
-)
+# =============================================================================
+# SECTION: MODULE LINKING (Vendor Resolver → monitor_core)
+# =============================================================================
+# region MODULE LINKING
 
-try:
-    import paramiko
-except Exception:
-    paramiko = None
+import vendor_resolver
+import monitor_core
 
-# Optional offline fallback (does not hit network)
-try:
-    from manuf import manuf  # pip install manuf
-    _MANUF = manuf.MacParser(update=False)
-except Exception:
-    _MANUF = None
+# Ensure monitor_core uses the unified vendor resolver
+monitor_core.vendor_for_mac = vendor_resolver.vendor_for_mac
 
-# Windows toast
-try:
-    from win10toast import ToastNotifier
-    _TOASTER = ToastNotifier() if ENABLE_TOASTS else None
-except Exception:
-    _TOASTER = None
-# end Windows toast
-
-# Regex for splitting host:port strings
-_SPLIT_RE = re.compile(r"[,\|\t ]+")
-
-# endregion IMPORTS & GLOBALS
+# endregion MODULE LINKING
 
 # =============================================================================
-# SECTION: ENRICHMENT (Vendor lookup, Device naming)
+# SECTION: DEVICE + HOST ALIAS MANAGER (modern resolver)
 # =============================================================================
-# region ENRICHMENT
+# region ALIAS_MANAGER
 
-'''
-try:
-    from engine.vendors import VendorDB
-    from engine.device_names import DeviceNamer
-except Exception:
-    class VendorDB:
-        def __init__(self, *a, **k): pass
-        def lookup(self, mac): return "Unknown"
-    class DeviceNamer:
-        def __init__(self, *a, **k): pass
-        def name_for(self, mac, ip): return None
-        def set_name(self, name, mac=None, ip=None): pass '''
+class AliasManager:
+    """
+    Centralised resolver for:
+      • custom IP → device label
+      • custom MAC → device label
+      • JSON-backed persistence
+    """
+
+    def __init__(self, ip_path: Path, mac_path: Path):
+        self.ip_path = ip_path
+        self.mac_path = mac_path
+        self.ip_labels = self._load_json(ip_path)
+        self.mac_labels = self._load_json(mac_path)
+
+    # ---- JSON helpers -----------------------------------------------------
+    
+    # =============================================================================
+    # SECTION: JSON helpers
+    # =============================================================================
+    # region JSON helpers
+
+    def _load_json(self, path: Path) -> dict[str, str]:
+        try:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf8"))
+        except Exception:
+            pass
+        return {}
+
+    def _save_json(self, path: Path, data: dict[str, str]) -> None:
+        try:
+            path.write_text(json.dumps(data, indent=2), encoding="utf8")
+        except Exception:
+            pass
+    # endregion JSON helpers
+
+    # =============================================================================
+    # SECTION: IP label handling
+    # =============================================================================
+    # region IP label handling
+
+    def name_for_ip(self, ip: str) -> str | None:
+        """Return custom label for an IP, or None."""
+        return self.ip_labels.get(ip)
+
+    def set_name_for_ip(self, ip: str, name: str | None):
+        if name:
+            self.ip_labels[ip] = name
+        else:
+            self.ip_labels.pop(ip, None)
+        self._save_json(self.ip_path, self.ip_labels)
+
+    # endregion IP label handling
+    
+    # =============================================================================
+    # SECTION: MAC label handling
+    # =============================================================================
+    # region MAC label handling
+
+    def label_for_mac(self, mac: str) -> str | None:
+        return self.mac_labels.get(mac.upper())
+
+    def set_label_for_mac(self, mac: str, name: str | None):
+        mac = mac.upper()
+        if name:
+            self.mac_labels[mac] = name
+        else:
+            self.mac_labels.pop(mac, None)
+        self._save_json(self.mac_path, self.mac_labels)
+
+    # endregion MAC label handling
+
+    # =============================================================================
+    # SECTION: Convenience
+    # =============================================================================
+    # region Convenience
+
+    @staticmethod
+    def ip_from_hostport(hostport: str) -> str:
+        """Extract '192.168.1.50' from '192.168.1.50:443'."""
+        if not hostport:
+            return ""
+        return hostport.split(":", 1)[0]
+    
+    # endregion Convenience
+
+# endregion ALIAS_MANAGER
 
 # =============================================================================
 # SECTION: CONSTANTS & SETTINGS
@@ -128,8 +176,8 @@ except Exception:
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "6.0.1"
-VERSION_DATE = "2025.11.24"
+VERSION = "6.1.0"
+VERSION_DATE = "2025.11.28"
 
 #uaser data defaults
 ENABLE_CONNTRACK_SSH = True   # ← make sure this is here and not commented out
@@ -177,6 +225,76 @@ _DEFAULT_CFG = {
     },
     "details_width": 380,   # default right-hand details panel width in pixels
 }
+
+# endregion CONSTANTS & SETTINGS
+
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message=r"pkg_resources is deprecated.*",
+    category=UserWarning,
+)
+
+try:
+    import paramiko
+except Exception:
+    paramiko = None
+
+# Optional offline fallback (does not hit network)
+try:
+    from manuf import manuf  # pip install manuf
+    _MANUF = manuf.MacParser(update=False)
+except Exception:
+    _MANUF = None
+    
+# Safe, dependency-tolerant imports
+try:
+    from manuf import manuf as _manuf_mod  # pip install manuf
+except Exception:
+    _manuf_mod = None
+
+# Windows toast
+try:
+    from win10toast import ToastNotifier
+    _TOASTER = ToastNotifier() if ENABLE_TOASTS else None
+except Exception:
+    _TOASTER = None
+# end Windows toast
+
+# Regex for splitting host:port strings
+_SPLIT_RE = re.compile(r"[,\|\t ]+")
+
+# endregion IMPORTS & GLOBALS
+
+# =============================================================================
+# SECTION: ENRICHMENT (Vendor lookup, Device naming)
+# =============================================================================
+# region ENRICHMENT
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+
+# New names, at project root (same folder as main.py).
+# If you prefer them in ./data just change BASE_DIR -> DATA_DIR.
+HOST_ALIAS_PATH   = DATA_DIR / "local_ip_labels.json"
+MAC_LABELS_PATH   = DATA_DIR / "local_mac_labels.json"
+
+HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
+MAC_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Vendor enrichment overrides (OUI / full-MAC → vendor), JSON-based
+VENDOR_OVERRIDES_JSON = DATA_DIR / "vmac-vendor-overrides.txt"
+VENDOR_OVERRIDES_JSON.parent.mkdir(parents=True, exist_ok=True)
+
+
+# Global instance used by all UI + core display functions
+_ALIASES = AliasManager(
+    ip_path=HOST_ALIAS_PATH,
+    mac_path=MAC_LABELS_PATH,
+)
+
+from vendor_resolver import vendor_for_mac
+
+
 
 # ======================================================================
 # UI Layout Tunables (right-hand details panel)
@@ -256,67 +374,19 @@ SILENCED_MACS = {
 _WHITELIST_DESTS = set(WHITELIST_DESTS)  # as-is (exact ip:port strings)
 _SILENCED_MACS = {m.upper() for m in SILENCED_MACS}
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+from monitor_core import (
+    MonitorCore, 
+    walk_arp_table,
+    _walk_ipnet_physical,
+    _walk_at_mib,
+    normalize_mac,
 
-# New names, at project root (same folder as main.py).
-# If you prefer them in ./data just change BASE_DIR -> DATA_DIR.
-HOST_ALIAS_PATH   = DATA_DIR / "local_ip_labels.json"
-MAC_LABELS_PATH   = DATA_DIR / "local_mac_labels.json"
-
-HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
-MAC_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-# Vendor enrichment overrides (OUI / full-MAC → vendor), JSON-based
-VENDOR_OVERRIDES_JSON = DATA_DIR / "vmac-vendor-overrides.txt"
-VENDOR_OVERRIDES_JSON.parent.mkdir(parents=True, exist_ok=True)
-
-#VENDOR_DB = VendorDB(base_dir=BASE_DIR)
-#DEVICE_NAMER = DeviceNamer(base_dir=BASE_DIR)
+)
 # endregion ENRICHMENT
 
-# endregion CONSTANTS & SETTINGS
-
-# === BEGIN: Unified Vendor Resolver (drop-in) ================================
-
-BUILTIN_OUI = {
-    "00:1A:11": "Ubiquiti Networks",
-    "00:1C:BF": "Ubiquiti Networks",
-    "24:A4:3C": "Ubiquiti Networks",
-    "44:D9:E7": "Ubiquiti Networks",
-    "FC:EC:DA": "Ubiquiti Networks",
-    "00:1B:63": "Apple",
-    "3C:5A:B4": "Apple",
-    "D8:BB:2C": "Apple",
-    "F0:18:98": "Samsung",
-    "FC:45:C3": "Samsung",
-    
-    
-    "3C:2A:F4": "Brother Industries",
-    "00:18:DD": "Silicondust Engineering",
-    "38:22:E2": "HP Inc.",
-    "34:31:7F": "Panasonic Appliances",
-    "D8:5E:D3": "Gigabyte",
-    "B0:F7:C4": "Amazon Technologies",
-    "38:F7:3D": "Amazon Technologies",
-    "3C:8C:93": "Juniper Networks",
-}
-
-# Optional local overrides you want to force (OUI = first 3 bytes)
-LOCAL_OUI_OVERRIDES = {
-    "6C:1F:F7": "Apple, Inc.",
-    "B0:F7:C4": "Ubiquiti Inc.",
-    "52:6D:8F": "Samsung Electronics",
-}
-
 # Treat these as unknown
-ZERO_MACS = monitor_core.ZERO_MACS = {"00:00:00:00:00:00", "00-00-00-00-00-00", "", None}
-
-# Safe, dependency-tolerant imports
-try:
-    from manuf import manuf as _manuf_mod  # pip install manuf
-except Exception:
-    _manuf_mod = None
+#moved to monitor_core.py
+#ZERO_MACS = monitor_core.ZERO_MACS = {"00:00:00:00:00:00", "00-00-00-00-00-00", "", None}
 
 try:
     #from mac_vendor_lookup import MacLookup, AsyncMacLookup  # pip install mac-vendor-lookup aiofiles
@@ -324,11 +394,6 @@ try:
 except Exception:
     #MacLookup = None
     AsyncMacLookup = None
-
-# Normalize MAC to "AA:BB:CC:DD:EE:FF"
-_MAC_RE = re.compile(r"[0-9A-Fa-f]{2}")
-
-
 
 # --- [NET] load_mac_labels ------------------------------------
 def load_mac_labels() -> dict:
@@ -360,7 +425,6 @@ def load_mac_labels() -> dict:
 
     return fixed
 
-
 # --- [NET] save_mac_labels ------------------------------------
 def save_mac_labels(labels: dict[str, str]) -> None:
     """
@@ -386,30 +450,7 @@ def save_mac_labels(labels: dict[str, str]) -> None:
         # Fail silently – UI should keep working even if write fails
         pass
     
-# --- [NET] _normalize_mac ----------------------------------------
-def _normalize_mac(mac: str) -> str:
-    """
-    Normalize a MAC address into ``AA:BB:CC:DD:EE:FF`` form.
 
-    Any hyphens are replaced with colons, and plain 12-hex strings are split
-    into pairs. Zero/empty MACs (e.g. ``00:00:00:00:00:00``) are returned as
-    an empty string.
-
-    Parameters
-    ----------
-    mac : Any
-        Raw MAC value from SNMP/NetFlow/conntrack (bytes, string, etc).
-
-    Returns
-    -------
-    str
-        Normalized MAC string or ``""`` if the value is empty/invalid.
-    """
-    if not mac:
-        return ""
-    parts = _MAC_RE.findall(mac)
-    parts = [p.upper() for p in parts[:6]]
-    return ":".join(parts) if len(parts) == 6 else ""
 
 # --- [NET] _norm_mac ----------------------------------------
 def _norm_mac(mac: str) -> str:
@@ -518,6 +559,18 @@ class _HostnameResolver:
             # don't override alias
             if ip not in self._aliases and hostname:
                 self._rdns_cache[ip] = hostname
+
+# =============================================================================
+# SECTION: HOSTNAME ALIAS RESOLVER (GLOBAL INSTANCE)
+# =============================================================================
+
+# This must appear BEFORE class App so Pylance sees it as defined,
+# and so App._display_local and other methods can use it.
+
+_HOSTNAMES = _HostnameResolver(HOST_ALIAS_PATH)
+_HOSTNAMES
+
+# endregion HOSTNAME ALIAS RESOLVER
 
 # === END: Unified Vendor Resolver ===========================================
 
@@ -1000,6 +1053,66 @@ class App(tk.Tk):
     - Persistence of layout and config (window size, column widths, details width)
     """
 
+    # --- [CONFIG] load_config ------------------------------------
+    def load_config(self) -> dict:
+        """
+        Load config.json into memory. Falls back to defaults if missing
+        or malformed. Never raises. Persist runtime config to disk including window geometry,
+        state, and panel width values stored in self.cfg.
+        """
+        try:
+            if CONFIG_FILE.exists():
+                with CONFIG_FILE.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return {**_DEFAULT_CFG, **data}
+        except Exception:
+            pass
+        return dict(_DEFAULT_CFG)
+
+    # --- [CONFIG] save_config ------------------------------------
+    def save_config(self, cfg: dict | None = None) -> None:
+        """
+        Persist runtime config to disk including window geometry,
+        state, and panel width values stored in self.cfg.
+
+        If cfg is provided, that dict is written; otherwise self.cfg is used.
+        This keeps it compatible with older call sites that did
+        save_config(self.cfg).
+        """
+        try:
+            # Use caller-provided cfg or fallback to self.cfg
+            if cfg is None:
+                cfg = getattr(self, "cfg", None)
+            if not isinstance(cfg, dict):
+                return
+
+            # 1) Update window props before saving
+            try:
+                cfg["window_geometry"] = self.geometry()
+            except Exception:
+                pass
+
+            try:
+                cfg["window_state"] = "zoomed" if self.state() == "zoomed" else "normal"
+            except Exception:
+                cfg["window_state"] = "normal"
+
+            # 2) (Optional) update details width from the actual panel if you want
+            try:
+                if hasattr(self, "details_panel"):
+                    cfg["details_width"] = int(self.details_panel.winfo_width())
+            except Exception:
+                pass
+
+            # 3) Actually write config to disk
+            with CONFIG_FILE.open("w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, sort_keys=True)
+
+        except Exception:
+            # don't crash UI if disk write fails
+            pass
+
     # --- [UI|INIT] __init__ ------------------------------------
     def __init__(self):
         """
@@ -1418,9 +1531,9 @@ class App(tk.Tk):
 
     # --- [UI|DETAILS] _build_details_panel ------------------------------------
     def _build_details_panel(self, parent: tk.Frame) -> None:
-    # ------------------------------------------------------------------
-    # Right-hand "Selected Device / Connection" panel
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Right-hand "Selected Device / Connection" panel
+        # ------------------------------------------------------------------
         """
         Build the right-hand device details panel.
 
@@ -1469,7 +1582,6 @@ class App(tk.Tk):
 
         # Initialise with "no selection" state
         self._clear_details_panel()
-
 
     # --- [UI|DETAILS] _wrap_friendly_uri ---------------------------------------
     def _wrap_friendly_uri(self, uri: str) -> str:
@@ -2186,6 +2298,8 @@ class App(tk.Tk):
         - Export… is disabled if there are no overrides in the resolver
         - Import… is disabled if the JSON file doesn't exist
         """
+        
+        ''' disables after refactoring
         vm = getattr(self, "vendor_menu", None)
         if vm is None:
             return
@@ -2210,8 +2324,8 @@ class App(tk.Tk):
         vm.entryconfig(
             "Import Vendor Overrides…",
             state="normal" if exists else "disabled",
-        )
-
+        )'''
+        
     # --- [UI|MENU] _menu_export_vendor_overrides ------------------------------------
     def _menu_export_vendor_overrides(self):
         from tkinter import filedialog, messagebox
@@ -2776,40 +2890,21 @@ class App(tk.Tk):
             host = None
         return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
 
+    
+    # =============================================================================
+    # SECTION:Local MAC labels: get / set helpers
+    # =============================================================================
+    # region Local MAC labels: get / set helpers
+
     # --- [UI] _get_current_label_for_mac ------------------------------------
     def _get_current_label_for_mac(self, mac: str) -> str:
-        """
-        Look up the current friendly label for a given MAC address.
+        return _ALIASES.label_for_mac(mac) or ""
+    
+    # --- [UI] _set_label_for_mac ------------------------------------
+    def _set_label_for_mac(self, mac: str, label: str):
+        _ALIASES.set_label_for_mac(mac, label)
 
-        Handles both:
-          - old format: { MAC: "Label" }
-          - new format: { MAC: { "label": "Label" } }
-
-        Returns an empty string if no label has been assigned yet.
-        """
-        
-        if not mac:
-            return ""
-
-        try:
-            self._ensure_mac_labels_loaded()
-        except Exception:
-            # If loading fails, just behave as "no labels"
-            return ""
-
-        d = getattr(self, "_mac_labels", None) or {}
-        entry = d.get(mac.upper())
-
-        # New format: { "label": "Lee's Laptop" }
-        if isinstance(entry, dict):
-            return (entry.get("label") or "").strip()
-
-        # Old format: "Lee's Laptop"
-        if isinstance(entry, str):
-            return entry.strip()
-
-        # Anything else / not found
-        return ""
+    # endregion Local MAC labels: get / set helpers
 
     # --- [UI|VENDOR STATUS ICONS] ---------------------------------------
     def _init_vendor_status_icons(self) -> None:
@@ -3064,40 +3159,6 @@ class App(tk.Tk):
             return hp.rsplit(":", 1)[0]
         except Exception:
             return ""
-
-    # --- [UI] _set_label_for_mac ------------------------------------
-    def _set_label_for_mac(self, mac: str, label: str) -> None:
-        """Set or clear a custom label for a MAC and persist to disk."""
-        mac = (mac or "").strip().upper()
-        if not mac:
-            return
-
-        # Make sure in-memory dict is loaded from disk first
-        try:
-            self._ensure_mac_labels_loaded()
-        except Exception:
-            if not hasattr(self, "_mac_labels"):
-                self._mac_labels = {}
-
-        if not hasattr(self, "_mac_labels"):
-            self._mac_labels = {}
-
-        # Empty/whitespace label = remove mapping
-        lbl = (label or "").strip()
-        if lbl:
-            self._mac_labels[mac] = lbl
-        else:
-            self._mac_labels.pop(mac, None)
-
-        # Persist updated map AND refresh status-icon cache
-        try:
-            save_mac_labels(self._mac_labels)
-            # Keep the cache in sync so colours update immediately
-            self._mac_labels_cache = dict(self._mac_labels)
-        except Exception:
-            # Don't crash the UI if write fails
-            pass
-
 
     # --- [UI] _set_status ------------------------------------
     def _set_status(self, msg: str):
@@ -3365,16 +3426,20 @@ class App(tk.Tk):
 
     # --- [HOSTNAME|UI] _display_local --------------------------------------
     def _display_local(self, local_hostport: str) -> str:
-        ip = _HOSTNAMES._ip_from_hostport(local_hostport)
-        name = _HOSTNAMES.name_for_ip(ip)
-        # Style C: "name (ip):port" or "ip:port" if no name yet
+        """
+        Returns a human-friendly label for a local ip:port.
+        """
+        ip = AliasManager.ip_from_hostport(local_hostport)
         if not ip:
-            return local_hostport or ""
-        try:
-            ip_only, port = local_hostport.rsplit(":", 1)
-        except ValueError:
-            ip_only, port = ip, ""
-        return f"{name} ({ip}):{port}" if name else f"{ip}:{port}"
+            return local_hostport
+
+        # 1) Prefer user-defined IP labels
+        name = _ALIASES.name_for_ip(ip)
+        if name:
+            return f"{name}  ({local_hostport})"
+
+        # 2) No label defined → just show IP normally
+        return local_hostport
 
     # --- Menu handlers ---
     # --- [UI] _on_about --------------------------------------
@@ -3451,66 +3516,6 @@ class App(tk.Tk):
 
         lines = ["# OUI,count"] + [f"{k},{v}" for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
         self._copy_to_clipboard("\n".join(lines), "Unknown vendor OUIs copied.")
-
-    # --- [CONFIG] load_config ------------------------------------
-    def load_config(self) -> dict:
-        """
-        Load config.json into memory. Falls back to defaults if missing
-        or malformed. Never raises. Persist runtime config to disk including window geometry,
-        state, and panel width values stored in self.cfg.
-        """
-        try:
-            if CONFIG_FILE.exists():
-                with CONFIG_FILE.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        return {**_DEFAULT_CFG, **data}
-        except Exception:
-            pass
-        return dict(_DEFAULT_CFG)
-
-    # --- [CONFIG] save_config ------------------------------------
-    def save_config(self, cfg: dict | None = None) -> None:
-        """
-        Persist runtime config to disk including window geometry,
-        state, and panel width values stored in self.cfg.
-
-        If cfg is provided, that dict is written; otherwise self.cfg is used.
-        This keeps it compatible with older call sites that did
-        save_config(self.cfg).
-        """
-        try:
-            # Use caller-provided cfg or fallback to self.cfg
-            if cfg is None:
-                cfg = getattr(self, "cfg", None)
-            if not isinstance(cfg, dict):
-                return
-
-            # 1) Update window props before saving
-            try:
-                cfg["window_geometry"] = self.geometry()
-            except Exception:
-                pass
-
-            try:
-                cfg["window_state"] = "zoomed" if self.state() == "zoomed" else "normal"
-            except Exception:
-                cfg["window_state"] = "normal"
-
-            # 2) (Optional) update details width from the actual panel if you want
-            try:
-                if hasattr(self, "details_panel"):
-                    cfg["details_width"] = int(self.details_panel.winfo_width())
-            except Exception:
-                pass
-
-            # 3) Actually write config to disk
-            with CONFIG_FILE.open("w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2, sort_keys=True)
-
-        except Exception:
-            # don't crash UI if disk write fails
-            pass
 
     # --- [UI|LIFECYCLE] _on_close ----------------------------------
     def _on_close(self):
@@ -4753,421 +4758,88 @@ def _is_locally_admin(mac: str) -> bool:
     except ValueError:
         return False
 
-class _VendorResolver:
-    
-    # --- [INIT] __init__ --------------------------------------
-    def __init__(self, files: Iterable[Path] = (), json_path: Path | None = None):
-        """
-        Vendor resolver that can:
-          - Load base OUI → vendor map from text files (mac-vendor.txt, etc.)
-          - Apply user overrides (full MAC or OUI) from JSON
-          - Track unknown OUIs for later enrichment
-
-        Parameters
-        ----------
-        files : Iterable[Path]
-            Optional explicit list of vendor DB text files.
-        json_path : Path | None
-            Optional path to JSON overrides file. Defaults to VENDOR_OVERRIDES_JSON.
-        """
-        self._map: Dict[str, str] = {}
-        self._alias: Dict[str, str] = {}      # full MAC (17 chars) or OUI → vendor
-        self._miss_cache: set[str] = set()
-        self._unknown_ouis: Dict[str, int] = {}
-        self._loaded_from: list[Path] = []
-        
-        # Where we persist/load JSON overrides
-        self._json_path: Path = Path(json_path) if json_path is not None else VENDOR_OVERRIDES_JSON
-        self.reload(files)
-
-    # --- [] reload --------------------------------------
-    def reload(self, files: Iterable[Path] = ()) -> None:
-        """
-        Reload base vendor DB from text files and then reapply JSON overrides.
-        """
-        self._map.clear()
-        self._alias.clear()
-        self._miss_cache.clear()
-        self._unknown_ouis.clear()
-        self._loaded_from = []
-
-        candidates = list(files) if files else _candidate_vendor_files()
-        for p in candidates:
-            try:
-                if p.exists():
-                    with p.open("r", encoding="utf-8", errors="replace") as f:
-                        m = _parse_vendor_lines(f)
-                    if m:
-                        self._map.update(m)
-                        self._loaded_from.append(p)
-            except Exception:
-                # stay resilient if any vendor DB file is broken
-                pass
-
-        # Finally, layer JSON overrides on top of the base map
-        self._load_json_overrides()
-
-    # ---------- JSON persistence for enrichment -----------
-
-    # --- [] _load_json_overrides --------------------------
-    def _load_json_overrides(self) -> None:
-        """
-        Merge overrides from the JSON file into self._alias.
-
-        JSON format (preferred):
-
-            {
-              "by_oui": {
-                "AA:BB:CC": "Vendor Name",
-                ...
-              },
-              "by_mac": {
-                "AA:BB:CC:DD:EE:FF": "Vendor Name",
-                ...
-              }
-            }
-
-        Backwards compat: a flat { key: vendor } dict also works.
-        """
-        path = getattr(self, "_json_path", None) or VENDOR_OVERRIDES_JSON
-        path = Path(path)
-
-        if not path.exists():
-            return
-
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                obj = json.load(f)
-        except Exception:
-            # ignore malformed JSON; user can fix the file
-            return
-
-        if isinstance(obj, dict) and ("by_oui" in obj or "by_mac" in obj):
-            items = []
-            items.extend((obj.get("by_oui") or {}).items())
-            items.extend((obj.get("by_mac") or {}).items())
-        elif isinstance(obj, dict):
-            # flat mapping
-            items = obj.items()
-        else:
-            return
-
-        for key, vendor in items:
-            if not isinstance(key, str):
-                continue
-            if vendor is None:
-                continue
-            vendor_str = str(vendor).strip()
-            if not vendor_str:
-                continue
-            # Reuse existing normalisation logic
-            self.add_vendor_alias(key, vendor_str)
-
-    # --- [] _save_json_overrides --------------------------
-    def _save_json_overrides(self, path: Path | None = None) -> int:
-        """
-        Persist current alias map (OUI/full-MAC → vendor) to JSON.
-
-        Returns
-        -------
-        int
-            Number of aliases written.
-        """
-        path = Path(path or getattr(self, "_json_path", None) or VENDOR_OVERRIDES_JSON)
-
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-
-        by_oui: dict[str, str] = {}
-        by_mac: dict[str, str] = {}
-
-        for key, vendor in sorted(self._alias.items()):
-            if not vendor:
-                continue
-            v = str(vendor).strip()
-            if not v:
-                continue
-            k = key.upper()
-            if len(k) == 17:       # AA:BB:CC:DD:EE:FF
-                by_mac[k] = v
-            elif len(k) == 8:      # AA:BB:CC
-                by_oui[k] = v
-
-        payload = {"by_oui": by_oui, "by_mac": by_mac}
-        try:
-            with path.open("w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, sort_keys=True)
-        except Exception:
-            return 0
-
-        return len(by_oui) + len(by_mac)
-
-    # ---------- Public JSON enrichment API ----------
-
-    # --- [] export_enrichment_json --------------------------
-    def export_enrichment_json(self, path: Path | None = None) -> int:
-        """
-        Export current overrides (OUI/full-MAC → vendor) to JSON.
-        If `path` is None, uses the default VENDOR_OVERRIDES_JSON.
-        Returns
-        -------
-        int
-            Number of entries written.
-        """
-        return self._save_json_overrides(path)
-
-    # --- [] import_enrichment_json --------------------------
-    def import_enrichment_json(self, path: Path | None = None, *, prefer_existing: bool = True,) -> int:
-        """
-        Import overrides from a JSON file and merge into the in-memory map.
-        Parameters
-        ----------
-        path : Path | None
-            JSON file to import from. Defaults to VENDOR_OVERRIDES_JSON.
-        prefer_existing : bool, default True
-            If True, keep existing aliases and only fill gaps.
-            If False, imported values overwrite existing ones.
-
-        Returns
-        -------
-        int
-            Number of aliases added or changed.
-        """
-        path = Path(path or getattr(self, "_json_path", None) or VENDOR_OVERRIDES_JSON)
-        if not path.exists():
-            return 0
-
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                obj = json.load(f)
-        except Exception:
-            return 0
-
-        if isinstance(obj, dict) and ("by_oui" in obj or "by_mac" in obj):
-            items = []
-            items.extend((obj.get("by_oui") or {}).items())
-            items.extend((obj.get("by_mac") or {}).items())
-        elif isinstance(obj, dict):
-            items = obj.items()
-        else:
-            return 0
-
-        changed = 0
-        for key, vendor in items:
-            if not isinstance(key, str):
-                continue
-            if vendor is None:
-                continue
-            vendor_str = str(vendor).strip()
-            if not vendor_str:
-                continue
-
-            # Normalise key to either full MAC or OUI
-            mac_norm = _normalize_mac(key)
-            if len(mac_norm) == 17:
-                k = mac_norm
-            else:
-                k = _normalize_oui_text(key)
-            if not k:
-                continue
-
-            old = self._alias.get(k)
-            if old == vendor_str:
-                continue
-            if prefer_existing and old:
-                # keep existing value
-                continue
-
-            self._alias[k] = vendor_str
-            changed += 1
-
-        # Persist merged view back to JSON
-        self._save_json_overrides(path)
-        return changed
-
-    # --- [] add_vendor_alias --------------------------------------
-    def add_vendor_alias(self, key: str, vendor: str):
-        """
-        key can be a full MAC ('AA:BB:CC:DD:EE:FF') or OUI ('AA:BB:CC').
-        """
-        mac_full = _normalize_mac(key)
-        if len(mac_full) == 17:
-            self._alias[mac_full] = vendor
-            return
-        oui = _normalize_oui_text(key)
-        if oui:
-            self._alias[oui] = vendor
-
-    # --- [] vendor_for_mac --------------------------------------
-    def vendor_for_mac(self, mac: str | None) -> str:
-        """
-        Resolve a MAC to a vendor name using the in-memory maps.
-
-        Order:
-          1) full MAC alias (override)
-          2) full MAC base map
-          3) OUI alias (override)
-          4) OUI base map
-          5) record unknown OUI and return "Unknown"
-        """
-        mac_norm = _norm_mac(mac or "")
-        if not mac_norm:
-            return "Unknown"
-
-        full = mac_norm.upper()
-
-        # 1) full-MAC alias
-        alias = self._alias.get(full)
-        if alias:
-            return alias
-
-        # 2) full-MAC base map
-        base = self._map.get(full)
-        if base:
-            return base
-
-        # 3–4) OUI-level lookup
-        oui = _mac_oui(mac_norm)
-        if oui:
-            # OUI alias override
-            alias = self._alias.get(oui)
-            if alias:
-                return alias
-
-            # OUI in base map
-            base = self._map.get(oui)
-            if base:
-                return base
-
-            # 5) track unknown OUIs for enrichment/export
-            self._unknown_ouis[oui] = self._unknown_ouis.get(oui, 0) + 1
-
-        return "Unknown"
-
-    # --- [] export_unknowns --------------------------------------
-    def export_unknowns(self, path: Optional[Path] = None):
-        """
-        Write the most frequent unknown OUIs to a file for curation.
-        """
-        if not path:
-            path = BASE_DIR / "unknown_ouis.txt"
-        try:
-            lines = [f"{k},{self._unknown_ouis[k]}" for k in sorted(self._unknown_ouis)]
-            path.write_text("\n".join(lines), encoding="utf-8")
-        except Exception:
-            pass
-
-    # --- [] export_unknowns_text --------------------------------------
-    def export_unknowns_text(self) -> str:
-        if not getattr(self, "_unknown_ouis", None):
-            return ""
-        lines = ["# OUI,count"]
-        lines += [f"{oui},{cnt}" for oui, cnt in sorted(self._unknown_ouis.items(),
-                                                        key=lambda kv: kv[1], reverse=True)]
-        return "\n".join(lines)
-
-    # --- [] export_unknown_macs_text --------------------------------------
-    def export_unknown_macs_text(self) -> str:
-        # optional: if you also track full unknown MACs
-        s = getattr(self, "_unknown_macs", None)
-        if not s:
-            return ""
-        return "\n".join(sorted(s))
-
-    # --- [] export_unknowns_to_clipboard --------------------------------------
-    def export_unknowns_to_clipboard(self, copier=None) -> bool:
-        """
-        Copies the OUI,count list to clipboard.
-        If `copier` is provided (e.g. your existing copy_to_clipboard(str)), it will be used.
-        Falls back to Tk clipboard if not provided.
-        """
-        text = self.export_unknowns_text()
-        if not text:
-            print("[VENDOR] No unknown OUIs to export.")
-            return False
-
-        if copier:
-            copier(text)
-            print("[VENDOR] Unknown OUIs copied to clipboard via provided copier.")
-            return True
-
-        # Fallback: Tkinter clipboard
-        try:
-            import tkinter as tk
-            r = tk.Tk(); r.withdraw()
-            r.clipboard_clear(); r.clipboard_append(text)
-            r.update(); r.destroy()
-            print("[VENDOR] Unknown OUIs copied to clipboard.")
-            return True
-        except Exception as e:
-            print(f"[VENDOR] Clipboard export failed: {e}")
-            return False
-
-    # --- [] _is_locally_admin_from_full --------------------------------------
-    @staticmethod
-    def _is_locally_admin_from_full(mac_full: str) -> bool:
-        """Assumes 'AA:BB:CC:DD:EE:FF'. Checks the U/L (locally-admin) bit."""
-        if not mac_full or len(mac_full) < 2:
-            return False
-        try:
-            first_byte = int(mac_full.split(":")[0], 16)
-            return (first_byte & 0b10) != 0
-        except Exception:
-            return False
-
-_HOSTNAMES = _HostnameResolver(HOST_ALIAS_PATH)
-_HOSTNAMES
-
-# Optional helper if you want a manual fix list right here:
-# _VENDOR.add_vendor_alias("B0:F7:C4", "Amazon Technologies Inc.")   # OUI alias
-# _VENDOR.add_vendor_alias("B0:F7:C4:DC:90:B5", "My Server (Amazon)") # full MAC alias
-# -------------------- end enhanced resolver --------------------
-
 # =============================================================================
-# SECTION: UNIFIED VENDOR RESOLUTION (override vendors_offline)
+# SECTION: VENDOR RESOLVER (shared core + UI)
 # =============================================================================
+# region VENDOR RESOLVER (shared core + UI)
 
-# Single shared resolver instance
-_VENDORS = _VendorResolver()
+from pathlib import Path
+from typing import Optional
 
-def export_vendor_enrichment(path: str | Path | None = None) -> int:
-    """
-    Export vendor overrides (OUI/full-MAC → vendor) to JSON.
+# We centralise all MAC → vendor logic in vendor_resolver.py.
+# That module already knows about:
+#   * mac-vendor-lookup’s offline database
+#   * data/mac-vendor.txt
+#   * data/mac-vendor-overrides.txt
+#   * LOCAL_OUI_OVERRIDES inside vendor_resolver.py
+#
+# Here we just expose thin wrappers so the rest of the app
+# (core + UI) always goes through the same resolver.
 
-    If `path` is None, uses VENDOR_OVERRIDES_JSON.
-    Returns the number of entries written.
-    """
-    p = Path(path) if path is not None else None
-    return _VENDORS.export_enrichment_json(p)
 
-def import_vendor_enrichment(path: str | Path | None = None, *, prefer_existing: bool = True,) -> int:
-    """
-    Import vendor overrides from JSON and merge into the resolver.
-
-    If `path` is None, uses VENDOR_OVERRIDES_JSON.
-    Returns the number of aliases added/changed.
-    """
-    p = Path(path) if path is not None else None
-    return _VENDORS.import_enrichment_json(p, prefer_existing=prefer_existing)
-
-# --- [] vendor_for_mac --------------------------------------
-def vendor_for_mac(mac: str | None) -> str:
+def vendor_for_mac(mac: Optional[str]) -> str:
     """
     Unified vendor lookup used by the whole app.
 
-    Order of precedence (handled by VendorDB / _VENDORS):
-      1) data/mac-vendor-overrides.txt  (your custom OUIs, e.g. BE:04:DE,OPPO)
-      2) data/mac-vendor.txt            (big OUI database)
-      3) Fallback: "Unknown"
+    Delegates to vendor_resolver.vendor_for_mac(), which returns a plain
+    vendor name (no special tagging of locally administered addresses).
     """
-    # _VENDORS is your global VendorDB instance built at startup
-    return _VENDORS.vendor_for_mac(mac or "")
+    return vendor_resolver.vendor_for_mac(mac)
 
-# Let monitor_core use the same vendor resolver
+
+def vendor_for_display(mac: Optional[str]) -> str:
+    """
+    UI-friendly vendor label for a MAC address.
+
+    Delegates to vendor_resolver.vendor_for_display(), which applies
+    UI tweaks such as showing locally administered addresses as
+    'Randomized (LAA)' (or similar label from vendor_resolver).
+    """
+    return vendor_resolver.vendor_for_display(mac)
+
+
+# Make the monitoring core use the exact same resolver.
+# monitor_core imports vendor_for_mac as a callable at module scope.
 import monitor_core
+
 monitor_core.vendor_for_mac = vendor_for_mac
+
+
+# --- JSON export / import stubs (legacy menu items) --------------------------
+#
+# The old implementation stored "enrichment" in an in-memory map and let you
+# export/import JSON files. We’ve moved to text-based overrides under data/
+# (mac-vendor.txt and mac-vendor-overrides.txt), so there isn’t really a
+# separate JSON enrichment layer any more.
+#
+# To avoid breaking the existing menu items, we keep compatible function
+# names and signatures, but make them harmless no-ops that just return 0.
+# If you decide you don’t want those menu items at all, you can later
+# remove the handlers that call these and delete this stub section.
+
+def export_vendor_enrichment(path: str | Path | None = None) -> int:
+    """
+    Legacy stub: there is nothing to export now that vendor overrides live
+    in text files under data/. We return 0 so the caller can still show
+    'Exported 0 entries' without crashing.
+    """
+    return 0
+
+
+def import_vendor_enrichment(
+    path: str | Path | None = None,
+    *,
+    prefer_existing: bool = True,
+) -> int:
+    """
+    Legacy stub: there is nothing to import here; overrides are loaded
+    from the text files in data/. Returning 0 keeps the menu handler happy.
+    """
+    return 0
+
+
+# endregion VENDOR RESOLVER (shared core + UI)
+# =============================================================================
 
 # =============================================================================
 # SECTION: ENTRY POINT (main guard)
@@ -5179,7 +4851,6 @@ if __name__ == "__main__":
     try:
         import tkinter  # ensure available early
         _load_secrets()
-        update_vendor_db_now()
         App().mainloop()
     except KeyboardInterrupt:
         sys.exit(0)
