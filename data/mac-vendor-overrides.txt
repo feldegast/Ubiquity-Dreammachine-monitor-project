@@ -1,8 +1,8 @@
-6C:1F:F7,Ugreen Group Limited
-9C:67:D6,Intel Corporate
-00:18:DD,Silicondust Engineering Ltd. 
-B0:F7:C4,Amazon Technologies Inc. 
-3C:2A:F4,Brother Industries, LTD. 
-3C:8C:93,Juniper Networks 
-D8:5E:D3,GIGA-BYTE TECHNOLOGY CO., LTD.
-BE:04:DE,OPPO Mobile Telecommunications Corp.
+6C1FF7  Ugreen Group Limited
+9C67D6  Intel Corporate
+0018DD  Silicondust Engineering Ltd. 
+B0F7C4  Amazon Technologies Inc. 
+3C2AF4  Brother Industries, LTD. 
+3C8C93  Juniper Networks 
+D85ED3  GIGA-BYTE TECHNOLOGY CO., LTD.
+BE04DE  OPPO Mobile Telecommunications Corp.

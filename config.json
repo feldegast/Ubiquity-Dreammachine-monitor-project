@@ -12,14 +12,14 @@
     },
     "agg": {
       "bytes": 110,
-      "dest": 554,
+      "dest": 571,
       "mac": 160,
       "sightings": 140,
       "vendor": 220
     },
     "alerts": {
       "bytes": 122,
-      "dest": 251,
+      "dest": 268,
       "local": 160,
       "mac": 160,
       "note": 139,
@@ -29,7 +29,7 @@
   },
   "copy_limit_rows": 200,
   "debug_log_tail_lines": 200,
-  "details_width": 277,
+  "details_width": 260,
   "enable_conntrack_ssh": false,
   "enable_netflow_v5_collector": false,
   "enable_toasts": false,

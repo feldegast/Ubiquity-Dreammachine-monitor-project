@@ -49,15 +49,13 @@ from ui_theme import (
     COLOR_VENDOR_LAA,# locally-administered / randomized (LAA
 )
 
-from collections import defaultdict
-
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Iterable, Dict, Optional
 from tkinter import filedialog
 
-from vendor_resolver import _normalize_mac
+from collections import defaultdict
 from collectors import NetflowV5Collector, ConntrackCollectorSSH
 
 # ---- Vendor lookup (optional) ----
@@ -81,91 +79,7 @@ monitor_core.vendor_for_mac = vendor_resolver.vendor_for_mac
 # =============================================================================
 # region ALIAS_MANAGER
 
-class AliasManager:
-    """
-    Centralised resolver for:
-      • custom IP → device label
-      • custom MAC → device label
-      • JSON-backed persistence
-    """
-
-    def __init__(self, ip_path: Path, mac_path: Path):
-        self.ip_path = ip_path
-        self.mac_path = mac_path
-        self.ip_labels = self._load_json(ip_path)
-        self.mac_labels = self._load_json(mac_path)
-
-    # ---- JSON helpers -----------------------------------------------------
-    
-    # =============================================================================
-    # SECTION: JSON helpers
-    # =============================================================================
-    # region JSON helpers
-
-    def _load_json(self, path: Path) -> dict[str, str]:
-        try:
-            if path.exists():
-                return json.loads(path.read_text(encoding="utf8"))
-        except Exception:
-            pass
-        return {}
-
-    def _save_json(self, path: Path, data: dict[str, str]) -> None:
-        try:
-            path.write_text(json.dumps(data, indent=2), encoding="utf8")
-        except Exception:
-            pass
-    # endregion JSON helpers
-
-    # =============================================================================
-    # SECTION: IP label handling
-    # =============================================================================
-    # region IP label handling
-
-    def name_for_ip(self, ip: str) -> str | None:
-        """Return custom label for an IP, or None."""
-        return self.ip_labels.get(ip)
-
-    def set_name_for_ip(self, ip: str, name: str | None):
-        if name:
-            self.ip_labels[ip] = name
-        else:
-            self.ip_labels.pop(ip, None)
-        self._save_json(self.ip_path, self.ip_labels)
-
-    # endregion IP label handling
-    
-    # =============================================================================
-    # SECTION: MAC label handling
-    # =============================================================================
-    # region MAC label handling
-
-    def label_for_mac(self, mac: str) -> str | None:
-        return self.mac_labels.get(mac.upper())
-
-    def set_label_for_mac(self, mac: str, name: str | None):
-        mac = mac.upper()
-        if name:
-            self.mac_labels[mac] = name
-        else:
-            self.mac_labels.pop(mac, None)
-        self._save_json(self.mac_path, self.mac_labels)
-
-    # endregion MAC label handling
-
-    # =============================================================================
-    # SECTION: Convenience
-    # =============================================================================
-    # region Convenience
-
-    @staticmethod
-    def ip_from_hostport(hostport: str) -> str:
-        """Extract '192.168.1.50' from '192.168.1.50:443'."""
-        if not hostport:
-            return ""
-        return hostport.split(":", 1)[0]
-    
-    # endregion Convenience
+from helpers.alias_manager import AliasManager  # moved to helpers.alias_manager
 
 # endregion ALIAS_MANAGER
 
@@ -176,8 +90,8 @@ class AliasManager:
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "6.1.0"
-VERSION_DATE = "2025.11.28"
+VERSION = "6.2.0"
+VERSION_DATE = "2025.11.29"
 
 #uaser data defaults
 ENABLE_CONNTRACK_SSH = True   # ← make sure this is here and not commented out
@@ -186,7 +100,6 @@ POLL_INTERVAL_SECONDS = 5
 RESOLVE_RDNS = True
 DEFAULT_SHOW_IDLE_DEVICES = False   # Show MACs with no destinations/bytes in Aggregates table?
 ROUTER_IP = "192.168.1.1"
-LOG_FILENAME = "traffic_log.csv"
 COPY_LIMIT_ROWS = 200
 DEBUG_LOG_TAIL_LINES = 200
 DEBUG = False
@@ -196,9 +109,32 @@ ConntrackCollectorSSH.DEBUG = DEBUG
 # ---- Windows toast (optional) ----
 ENABLE_TOASTS = False  # ← turn off the flaky win10toast path
 
-# ========= USER CONFIG =========
-CONFIG_FILE = Path(__file__).with_name("config.json")
+# =============================================================================
+# FILE PATH CONSTANTS (single source of truth)
+# =============================================================================
+# region FILE PATH CONSTANTS
 
+from app_paths import (
+    BASE_DIR,
+    DATA_DIR,
+    CONFIG_FILE,
+    SSH_SECRETS_FILE,
+    LOG_FILENAME,
+    ALERT_LOG_FILENAME,
+    BASE_OUI_FILE,
+    OVERRIDE_OUI_FILE,
+    HOST_ALIAS_PATH,
+    MAC_LABELS_PATH,
+)
+
+# endregion FILE PATH CONSTANTS
+
+
+# Global instance used by all UI + core display functions
+_ALIASES = AliasManager(
+    ip_path=HOST_ALIAS_PATH,
+    mac_path=MAC_LABELS_PATH,
+)
 _DEFAULT_CFG = {
     "router_ip": ROUTER_IP,
     "enable_conntrack_ssh": ENABLE_CONNTRACK_SSH,
@@ -270,31 +206,8 @@ _SPLIT_RE = re.compile(r"[,\|\t ]+")
 # SECTION: ENRICHMENT (Vendor lookup, Device naming)
 # =============================================================================
 # region ENRICHMENT
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-
-# New names, at project root (same folder as main.py).
-# If you prefer them in ./data just change BASE_DIR -> DATA_DIR.
-HOST_ALIAS_PATH   = DATA_DIR / "local_ip_labels.json"
-MAC_LABELS_PATH   = DATA_DIR / "local_mac_labels.json"
-
-HOST_ALIAS_PATH.parent.mkdir(parents=True, exist_ok=True)
-MAC_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-# Vendor enrichment overrides (OUI / full-MAC → vendor), JSON-based
-VENDOR_OVERRIDES_JSON = DATA_DIR / "vmac-vendor-overrides.txt"
-VENDOR_OVERRIDES_JSON.parent.mkdir(parents=True, exist_ok=True)
-
-
-# Global instance used by all UI + core display functions
-_ALIASES = AliasManager(
-    ip_path=HOST_ALIAS_PATH,
-    mac_path=MAC_LABELS_PATH,
-)
 
 from vendor_resolver import vendor_for_mac
-
-
 
 # ======================================================================
 # UI Layout Tunables (right-hand details panel)
@@ -322,7 +235,7 @@ COL_W_BYTES = 110
 '''
 
 # --- Enable SSH conntrack collector ---
-SSH_SECRETS_FILE = "ssh_secrets.json"
+#filename defined in centralised filename constants
 UDM_SSH_HOST = ROUTER_IP
 UDM_SSH_PORT = 22           # usually 22
 # If your UDM lacks the "conntrack" binary, we’ll fall back to reading /proc
@@ -359,7 +272,6 @@ RDNS_TIMEOUT = 1.0  # seconds per lookup
 # ---------- ALERTING ----------
 ALERT_THRESHOLD_BYTES = 1_048_576  # 1 MB per single connection
 ALERT_COOLDOWN_SECS   = 300        # don't repeat alert for the same 5-tuple within this cooldown
-ALERT_LOG_FILENAME    = "alerts_log.csv"
 
 # Optional: suppress noisy/known traffic
 WHITELIST_DESTS = {
@@ -472,94 +384,7 @@ def _mac_oui(mac: str) -> str:
     return ":".join(parts[:3])  # "AA:BB:CC"
 
 # --- [HOSTNAME|CORE] _HostnameResolver ---------------------------------
-class _HostnameResolver:
-    """
-    Caches reverse-DNS results and supports user-defined hostname aliases.
-    Precedence: alias > rDNS > ''.
-    Thread-safe via a single RLock.
-    """
-    # --- [INIT] __init__  ------------------------------------
-    def __init__(self, alias_path: Path):
-        import threading, json
-        self._alias_path = Path(alias_path)
-        self._lock = threading.RLock()
-        self._aliases: dict[str, str] = {}
-        self._rdns_cache: dict[str, str] = {}
-        self._pending: set[str] = set()
-        self._load_aliases()  # load once on init
-
-    # ---------- persistence ----------
-    # --- [NET|UI] _load_aliases  ------------------------------------
-    def _load_aliases(self) -> None:
-        try:
-            if self._alias_path.exists():
-                with self._alias_path.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    with self._lock:
-                        # normalize keys to ip strings
-                        self._aliases = {str(k): str(v) for k, v in data.items() if v}
-        except Exception:
-            # don't crash UI if file is malformed
-            pass
-
-    # --- [NET|UI] _save_aliases  ------------------------------------
-    def _save_aliases(self) -> None:
-        # call only while holding self._lock
-        try:
-            self._alias_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._alias_path.open("w", encoding="utf-8") as f:
-                json.dump(self._aliases, f, indent=2, sort_keys=True)
-        except Exception:
-            pass
-
-    # ---------- public API ----------
-    # --- [NET|UI] aliases ------------------------------------
-    def aliases(self) -> dict[str, str]:
-        with self._lock:
-            return dict(self._aliases)
-        
-    # --- [NET|UI] set_alias  ------------------------------------
-    def set_alias(self, ip: str, name: str | None) -> None:
-        ip = (ip or "").strip()
-        with self._lock:
-            if name and name.strip():
-                self._aliases[ip] = name.strip()
-            else:
-                self._aliases.pop(ip, None)
-        self._save_aliases()
-
-    # --- [NET] clear_cache  ------------------------------------
-    def clear_cache(self) -> None:
-        """Clear rDNS cache, keep aliases."""
-        with self._lock:
-            self._rdns_cache.clear()
-
-    # --- [NET] _ip_from_hostport ------------------------------------
-    @staticmethod
-    def _ip_from_hostport(local_hostport: str) -> str:
-        # "A.B.C.D:port" -> "A.B.C.D"
-        s = (local_hostport or "").strip()
-        if not s:
-            return ""
-        parts = s.rsplit(":", 1)
-        return parts[0] if parts else s
-
-    # --- [NET] name_for_ip ------------------------------------
-    def name_for_ip(self, ip: str) -> str:
-        """Return alias if set, else cached rDNS, else ''. Non-blocking."""
-        with self._lock:
-            if ip in self._aliases:
-                return self._aliases[ip]
-            return self._rdns_cache.get(ip, "")
-
-    # --- [NET] put_rdns ------------------------------------
-    def put_rdns(self, ip: str, hostname: str) -> None:
-        with self._lock:
-            # don't override alias
-            if ip not in self._aliases and hostname:
-                self._rdns_cache[ip] = hostname
-
+from helpers.hostname_resolver import _HostnameResolver  # moved to helpers.hostname_resolver
 # =============================================================================
 # SECTION: HOSTNAME ALIAS RESOLVER (GLOBAL INSTANCE)
 # =============================================================================
@@ -1211,7 +1036,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Kick off the refresh loop AFTER widgets exist
-        self.after(100, self._refresh_ui)
+        self._reschedule_refresh(100)
     
     # =============================================================================
     # SECTION: UI WIDGETS (tables, dialogs, menus)
@@ -1448,7 +1273,7 @@ class App(tk.Tk):
         # SECTION: Active Connections table
         # ===================================================================================
         # region: Active Connections table
-    
+
         try:
             if hasattr(self, "tree") and self.tree is not None:
                 # DEBUG is a module-global in main.py
@@ -1647,9 +1472,11 @@ class App(tk.Tk):
         from tkinter import ttk  # noqa: F401  (for type hints / completeness)
         from monitor_core import normalize_mac
 
-        # ------------------------------------------------------------------
-        # 1) Ensure only ONE table has a highlighted row at any time
-        # ------------------------------------------------------------------
+        # ===================================================================================
+        # SECTION: 1) Ensure only ONE table has a highlighted row at any time
+        # ===================================================================================
+        # region: 1) Ensure only ONE table has a highlighted row at any time
+
         try:
             if table_name != "alerts" and hasattr(self, "alerts"):
                 self.alerts.selection_remove(*self.alerts.selection())
@@ -1660,10 +1487,13 @@ class App(tk.Tk):
         except Exception:
             # Don't let selection issues kill the update
             pass
+        # endregion: 1) Ensure only ONE table has a highlighted row at any time
+        
+        # ===================================================================================
+        # SECTION: 2) Find the selected item in THIS tree
+        # ===================================================================================
+        # region: 2) Find the selected item in THIS tree
 
-        # ------------------------------------------------------------------
-        # 2) Find the selected item in THIS tree
-        # ------------------------------------------------------------------
         sel = tv.selection()
         if not sel:
             # Fallback to focused item if nothing is formally selected
@@ -1684,9 +1514,13 @@ class App(tk.Tk):
         # Map column IDs -> cell values, e.g. {"mac": "...", "vendor": "..."}
         row = {col: values[idx] for idx, col in enumerate(cols) if idx < len(values)}
 
-        # ------------------------------------------------------------------
-        # 3) Extract common pieces according to table_name
-        # ------------------------------------------------------------------
+        # endregion: 2) Find the selected item in THIS tree
+
+        # ===================================================================================
+        # SECTION: 3) Extract common pieces according to table_name
+        # ===================================================================================
+        # region: 3) Extract common pieces according to table_name
+
         mac_raw = row.get("mac", "") or ""
         mac_norm = normalize_mac(mac_raw)
 
@@ -1718,9 +1552,13 @@ class App(tk.Tk):
         # Note (alerts only)
         note = row.get("note", "") or ""
 
-        # ------------------------------------------------------------------
-        # 4) Vendor / name – use our display helper (aliases, labels, etc.)
-        # ------------------------------------------------------------------
+        # endregion: 3) Extract common pieces according to table_name
+
+        # ===================================================================================
+        # SECTION: 4) Vendor / name – use our display helper (aliases, labels, etc.)
+        # ===================================================================================
+        # region: 4) Vendor / name – use our display helper (aliases, labels, etc.)
+        
         local_ip = ""
         if ":" in local_display:
             local_ip = local_display.rsplit(":", 1)[0]
@@ -1731,9 +1569,13 @@ class App(tk.Tk):
             or ""
         )
 
-        # ------------------------------------------------------------------
-        # 5) MAC status flags (labelled / known / laa / unknown)
-        # ------------------------------------------------------------------
+        # endregion: 4) Vendor / name – use our display helper (aliases, labels, etc.)
+        
+        # ===================================================================================
+        # SECTION: 5) MAC status flags (labelled / known / laa / unknown)
+        # ===================================================================================
+        # region: 5) MAC status flags (labelled / known / laa / unknown)
+
         status_key = self._vendor_status_for_mac(mac_norm)
         if status_key == "labelled":
             mac_flags = "Labelled host (green square)"
@@ -1744,9 +1586,13 @@ class App(tk.Tk):
         else:
             mac_flags = "Unknown / unrecognised vendor (red square)"
 
-        # ------------------------------------------------------------------
-        # 6) Push into the StringVars bound to the details panel labels
-        # ------------------------------------------------------------------
+        # endregion: 5) MAC status flags (labelled / known / laa / unknown)
+        
+        # ===================================================================================
+        # SECTION: 6) Push into the StringVars bound to the details panel labels
+        # ===================================================================================
+        # region: 6) Push into the StringVars bound to the details panel labels
+
         self.detail_mac.set(mac_norm or mac_raw or "Unknown")
         self.detail_name.set(display_name or "Unknown / unrecognised vendor")
         self.detail_local.set(local_display or "-")
@@ -1755,6 +1601,8 @@ class App(tk.Tk):
         self.detail_bytes.set(str(bytes_str) if bytes_str != "" else "-")
         self.detail_note.set(note or "-")
         self.detail_mac_flags.set(mac_flags)
+
+        # endregion: 6) Push into the StringVars bound to the details panel labels
 
     # --- [UI] notify ------------------------------------
     def notify(self, title, msg):
@@ -2544,7 +2392,6 @@ class App(tk.Tk):
         self.status_conn = tk.StringVar(value="Active: 0 | MACs: 0")
         self.status_flow = tk.StringVar(value="Flow: off")
         self.status_ssh = tk.StringVar(value="SSH: off")
-        self.status_clock = tk.StringVar(value="Clock: n/a")
 
         ttk.Label(statusf, textvariable=self.status_conn, anchor="e").pack(
             side="right", padx=(8, 0)
@@ -2555,9 +2402,7 @@ class App(tk.Tk):
         ttk.Label(statusf, textvariable=self.status_ssh, anchor="e").pack(
             side="right", padx=(8, 0)
         )
-        ttk.Label(statusf, textvariable=self.status_clock, anchor="e").pack(
-            side="right", padx=(8, 0)
-        )
+
 
         # endregion Statusbar (very bottom)
         
@@ -2634,7 +2479,7 @@ class App(tk.Tk):
 
         # schedule refresh after widgets exist
         try:
-            self.after(250, self._refresh_ui)
+            self._reschedule_refresh(250)
         except Exception:
             pass
         # endregion AAggregates (bottom of left content)
@@ -2943,6 +2788,7 @@ class App(tk.Tk):
         }
 
     # --- [UI|VENDOR STATUS CLASSIFIER] _vendor_status_for_mac -----------
+    # --- [UI|VENDOR STATUS CLASSIFIER] _vendor_status_for_mac -----------
     def _vendor_status_for_mac(self, mac: str | None) -> str:
         """
         Return one of: 'labelled', 'known', 'laa', 'unknown'.
@@ -2953,16 +2799,20 @@ class App(tk.Tk):
 
         'known' / 'laa' / 'unknown' come from vendor_resolver.
         """
+        # Local imports to avoid circular deps and keep this helper self-contained
         from vendor_resolver import vendor_for_mac, _is_locally_administered
+        from monitor_core import normalize_mac
 
-        # Normalise MAC using our local helper from this module
-        mac_norm = _normalize_mac(mac or "")
+        # Normalise MAC using the canonical normaliser
+        mac_norm = normalize_mac(mac or "")
         if not mac_norm or mac_norm == "00:00:00:00:00:00":
             return "unknown"
 
-        # ------------------------------------------------------------------
-        # 1) MAC labels (local_mac_labels.json) → 'labelled' (green)
-        # ------------------------------------------------------------------
+        # =============================================================================
+        # SECTION: 1) MAC labels (local_mac_labels.json) → 'labelled' (green)
+        # =============================================================================
+        # region 1) MAC labels (local_mac_labels.json) → 'labelled' (green)
+
         try:
             # Small cache so we don't re-read file every time
             label_map = getattr(self, "_mac_labels_cache", None)
@@ -2985,10 +2835,14 @@ class App(tk.Tk):
             # Never let label logic break the app
             pass
 
-        # ------------------------------------------------------------------
-        # 2) Hostname aliases (local_ip_labels.json) → 'labelled'
-        #    (hostname alias present, even if there is no MAC label)
-        # ------------------------------------------------------------------
+
+        # endregion 1) MAC labels (local_mac_labels.json) → 'labelled' (green)
+
+        # =============================================================================
+        # SECTION: 2) Hostname aliases (local_ip_labels.json) → 'labelled'
+        # =============================================================================
+        # region 2) Hostname aliases (local_ip_labels.json) → 'labelled'
+        
         try:
             core = getattr(self, "core", None)
             if core is not None:
@@ -2999,15 +2853,16 @@ class App(tk.Tk):
                         if not alias_name:
                             continue  # skip blank aliases
                         mac_for_ip = ip2mac.get(ip)
-                        if mac_for_ip and _normalize_mac(mac_for_ip) == mac_norm:
+                        if mac_for_ip and normalize_mac(mac_for_ip) == mac_norm:
                             return "labelled"
         except Exception:
             # Never let alias logic break the app
             pass
-
-        # ------------------------------------------------------------------
-        # 3) Fallback: vendor-based classification
-        # ------------------------------------------------------------------
+        # endregion 2) Hostname aliases (local_ip_labels.json) → 'labelled'
+        
+        # =============================================================================
+        # SECTION: 3) Fallback: vendor-based classification
+        # =============================================================================
         try:
             vendor_name = vendor_for_mac(mac_norm) or ""
         except Exception:
@@ -3023,6 +2878,7 @@ class App(tk.Tk):
 
         # Nothing else matched → unknown
         return "unknown"
+        # endregion 3) Fallback: vendor-based classification
 
     # --- [UI|VENDOR STATUS ICON LOOKUP] _status_icon_for_mac ---------------
     def _status_icon_for_mac(self, mac: str | None) -> tk.PhotoImage | None:
@@ -3191,6 +3047,23 @@ class App(tk.Tk):
             self.title(f"SNMP Monitor — {msg}")
         except Exception:
             print(str(msg))
+            
+    def _status_msg(self, msg: str):
+        """
+        Show a user-facing status message in the status bar.
+        Also print to console when DEBUG=True.
+
+        Use this instead of print() for important errors or warnings
+        that the user should see.
+        """
+        text = str(msg)
+        try:
+            self._set_status(text)
+        except Exception:
+            pass
+
+        if DEBUG:
+            print(text)
 
     # --- [UI|STATUS] _update_status_line ------------------------------------
     def _update_status_line(self):
@@ -3679,7 +3552,7 @@ class App(tk.Tk):
             return
 
         # Normalize once
-        mac_norm = _normalize_mac(mac) or mac.upper()
+        mac_norm = normalize_mac(mac) or mac.upper()
         ip = (ip or "").strip()
 
         # Reuse the existing edit dialog
@@ -3688,13 +3561,13 @@ class App(tk.Tk):
             return
 
         new_mac, label = result
-        new_mac = _normalize_mac(new_mac) or mac_norm
+        new_mac = normalize_mac(new_mac) or mac_norm
 
         # Persist via existing helper
         self._set_label_for_mac(new_mac, label)
 
         # Small delayed refresh so the vendor/label column updates
-        self.after(10, self._refresh_ui)
+        self._reschedule_refresh(10)
 
     # --- [UI] _on_toggle_show_idle --------------------------------------
     def _on_toggle_show_idle(self) -> None:
@@ -3702,7 +3575,7 @@ class App(tk.Tk):
         self.cfg["show_idle_devices"] = bool(self.show_idle_var.get())
         self.save_config()
         # Force a quick repaint so the table reflects the new filter
-        self.after(10, self._refresh_ui)
+        self._reschedule_refresh(10)
 
     # --- [UI] _on_test_ssh --------------------------------------
     def _on_test_ssh(self):
@@ -3784,6 +3657,12 @@ class App(tk.Tk):
         # Status line feedback
         self._set_status(f"rDNS {'ON' if RESOLVE_RDNS else 'OFF'}")
 
+    def _reschedule_refresh(self, delay_ms: int = 1000):
+        try:
+            self.after(delay_ms, self._refresh_ui)
+        except Exception:
+            pass
+
     # --- [UI|REFRESH] _refresh_ui ----------------------------------------------
     def _refresh_ui(self):
         """
@@ -3796,12 +3675,10 @@ class App(tk.Tk):
           clock skew warning).
         - Reschedules itself using after() while the app is running.
         """
-    
-        import time
-        
+
         if DEBUG:
             print("[DEBUG] UI sees conn_map size:", len(self.core.conn_map))
-            
+
         with self.core.data_lock:
             
 
@@ -3810,7 +3687,6 @@ class App(tk.Tk):
         # =============================================================================
         # region REFRESH.ALERTS (top) - drain queue, insert rows, toast
 
-            # Alerts table
             refresh_alerts_table(self, toaster=_TOASTER)
 
 
@@ -3846,11 +3722,12 @@ class App(tk.Tk):
                 dns_pending=_dns_pending,
                 resolve_rdns=RESOLVE_RDNS,
             )
-        
 
         # endregion REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS
         
-        # Re-apply any remembered sort on all tables
+        # ===============================================================
+        # REAPPLY SORT
+        # ===============================================================
         try:
             self._reapply_sort_if_any("alerts", self.alerts)
             self._reapply_sort_if_any("active", self.tree)
@@ -3863,114 +3740,112 @@ class App(tk.Tk):
         # =============================================================================
         # region STATUS LINE - SSH STATUS ECHO
         
-        nf_status = "OFF"
-        if self.nf:
-            if isinstance(self.nf, ConntrackCollectorSSH):
-                nf_status = f"Conntrack over SSH: {self.nf.status_msg or '…'}"
-            else:
-                bind_err = getattr(self.nf, "bind_error", None)
-                nf_status = (
-                    f"NetFlow v5 {NETFLOW_LISTEN_IP}:{NETFLOW_LISTEN_PORT}"
-                    if not bind_err
-                    else f"NetFlow ERROR: {bind_err}"
-                )
-    
-        if isinstance(self.nf, ConntrackCollectorSSH):
-            ssh_status = self.nf.status_msg or "…"
-            if ssh_status != getattr(self, "_last_ssh_status", None):
-                print(f"[SSH] {ssh_status}")
-                self._last_ssh_status = ssh_status
-    
-        snmp_label = get_snmp_backend_name()
-        counts = getattr(self.core, "last_counts", {"arp": 0, "tcp": 0, "flows": 0})
-    
-        # --- Status bar metrics -----------------------------------
+        # --- Status bar metrics: Active + MACs ----------------------------
         try:
-            # 1) Active connections + unique MACs
-            active_rows = getattr(self.core, "get_active_rows_prepared", None)
+            core = self.core
+            active_rows = getattr(core, "get_active_rows_prepared", None)
             if callable(active_rows):
                 rows = active_rows(limit=COPY_LIMIT_ROWS)
             else:
-                rows = list(getattr(self.core, "conn_map", {}).values())
-    
+                rows = list(core.conn_map.values())
+
             active_count = len(rows)
-            macs = {normalize_mac(r.get("local_mac") or r.get("mac") or "") for r in rows}
-            macs.discard("")  # remove empties
+
+            macs = {
+                normalize_mac(
+                    r.get("local_mac") or r.get("mac") or ""
+                )
+                for r in rows
+            }
+            macs.discard("")
             unique_macs = len(macs)
-    
+
             if hasattr(self, "status_conn"):
                 self.status_conn.set(f"Active: {active_count} | MACs: {unique_macs}")
-    
-            # 2) Flow collector state
-            flow_label = "Flow: off"
-            core = getattr(self, "core", None)
-            if core is not None:
-                try:
-                    last_counts = getattr(core, "last_counts", {}) or {}
-                    flows = int(last_counts.get("flows", 0))
-                    if getattr(core, "nf", None) is not None and ENABLE_NETFLOW_V5_COLLECTOR:
-                        flow_label = f"Flow: on ({flows} flows)"
-                except Exception:
-                    pass
-    
-            if hasattr(self, "status_flow"):
-                self.status_flow.set(flow_label)
-    
-            # 3) SSH collector state
-            ssh_label = "SSH: off"
-            try:
-                if ENABLE_CONNTRACK_SSH:
-                    # if you have a conntrack object with a status, use it here
-                    ssh_label = "SSH: on"
-            except Exception:
-                pass
-    
-            if hasattr(self, "status_ssh"):
-                self.status_ssh.set(ssh_label)
-    
-            # 4) Clock / timestamp warning (simple initial version)
-            clock_label = "Clock: ok"
-            try:
-                # rough heuristic: last alert/last_seen older than N seconds?
-                # you can refine this later with real router vs local time diff.
-                now_ts = time.time()
-                # If you have rows with 'last_seen' as epoch seconds:
-                lag = None
-                for r in rows:
-                    ts = r.get("last_seen") or r.get("first_seen")
-                    if isinstance(ts, (int, float)):
-                        dt = now_ts - ts
-                        if dt >= 0:
-                            lag = dt if lag is None else min(lag, dt)
-                if lag is not None and lag > 120:
-                    clock_label = f"Clock: {int(lag)}s behind?"
-            except Exception:
-                pass
-    
-            if hasattr(self, "status_clock"):
-                self.status_clock.set(clock_label)
-    
         except Exception:
-            # don't let status bar updates kill the UI
+            # Don't let status failures kill the UI
             pass
 
-        # --- Status bar update (non-fatal) ---
+        # --- Router IP on the left status text ----------------------------
         try:
-            self._update_status_line()
+            # Prefer an instance attribute if it ever exists, otherwise fall back
+            router_ip = getattr(self, "router_ip", None) or self.cfg.get("router_ip", ROUTER_IP)
+            self.status.set(f"Connected to: {router_ip}")
         except Exception:
-            if DEBUG:
-                import traceback
-                print("[UI|STATUS] exception:")
-                traceback.print_exc()
+            pass
+
+        # --- Flow + SSH backend status ------------------------------------
+        try:
+            from collectors import ConntrackCollectorSSH, NetflowV5Collector
+
+            core = self.core
+            nf = getattr(core, "nf", None)
+
+            # SSH label
+            ssh_label = "SSH: off"
+
+            if isinstance(nf, ConntrackCollectorSSH):
+                msg = nf.status_msg or "OK"
+                who = getattr(nf, "_who", None) or "console"
+                ssh_label = f"SSH: {msg} ({who})"
+
+                # Only print when changing (and in DEBUG)
+                if msg != getattr(self, "_last_ssh_status", None):
+                    if DEBUG:
+                        print(f"[SSH] {msg}")
+                    self._last_ssh_status = msg
+
+            elif ENABLE_CONNTRACK_SSH:
+                ssh_label = "SSH: enabled (idle)"
+
+            if hasattr(self, "status_ssh"):
+                self.status_ssh.set(ssh_label)
+
+            # Flow label
+            flow_label = "Flow: off"
+            try:
+                flows = int(core.last_counts.get("flows", 0))
+            except Exception:
+                flows = 0
+
+            if isinstance(nf, ConntrackCollectorSSH):
+                # SSH conntrack as flow source
+                if not flows:
+                    flows = active_count
+                flow_label = f"Flow: SSH conntrack ({flows} flows)"
+
+            elif isinstance(nf, NetflowV5Collector):
+                err = getattr(nf, "bind_error", None)
+                if err:
+                    flow_label = "Flow: NetFlow ERROR"
+                else:
+                    flow_label = f"Flow: NetFlow v5 ({flows} flows)"
+
+            else:
+                # SNMP-only fallback: show active connections
+                flow_label = f"Flow: SNMP ({active_count} connections)"
+
+            if hasattr(self, "status_flow"):
+                self.status_flow.set(flow_label)
+
+        except Exception:
+            # Again, never let status bar kill UI
+            pass
         
         # endregion STATUS LINE - SSH STATUS ECHO
         
-        # finally, reschedule next refresh
+        # ===============================================================
+        # SCHEDULE NEXT REFRESH
+        # ===============================================================
+        # region SCHEDULE NEXT REFRESH
+        
         if getattr(self, "_ui_ready", False):
             try:
-                self.after(1000, self._refresh_ui)
+                self._reschedule_refresh()
             except Exception:
                 pass
+
+        # endregion SCHEDULE NEXT REFRESH
 
     # --- [UI|DETAILS] _restore_details_width -----------------------------------
     def _restore_details_width(self) -> None:
@@ -4292,16 +4167,17 @@ class App(tk.Tk):
     
         Also handles randomized / locally-administered MACs by annotating with "(Random)".
         """
-
-        from vendor_resolver import _is_locally_administered, vendor_for_mac
-        from vendor_resolver import _normalize_mac as normalize_mac
+    
+        # 🔧 REQUIRED FIX — import helpers locally
+        from vendor_resolver import vendor_for_mac, _is_locally_administered
+        from monitor_core import normalize_mac
 
         mac_norm = normalize_mac(mac or "")
         vendor = (vendor or "").strip()
 
-        # ------------------------------------------------------------------
+        # =============================================================================
         # 1) Current MAC label (from mac_labels, via existing helper)
-        # ------------------------------------------------------------------
+        # =============================================================================
         label = ""
         try:
             if hasattr(self, "_get_current_label_for_mac"):
@@ -4309,9 +4185,9 @@ class App(tk.Tk):
         except Exception:
             label = ""
 
-        # ------------------------------------------------------------------
+        # =============================================================================
         # 2) Local hostname alias (from local_ip_labels.json)
-        # ------------------------------------------------------------------
+        # =============================================================================
         alias_name = ""
         if local_ip:
             try:
@@ -4322,9 +4198,9 @@ class App(tk.Tk):
 
             if isinstance(alias_map, dict):
                 alias_name = (alias_map.get(local_ip) or "").strip()
-        # ------------------------------------------------------------------
+        # =============================================================================
         # 3) Vendor lookup (if not supplied)
-        # ------------------------------------------------------------------
+        # =============================================================================
         if not vendor:
             try:
                 vendor = vendor_for_mac(mac_norm) or ""
@@ -4333,9 +4209,9 @@ class App(tk.Tk):
         vendor = vendor.strip()
         vendor_lower = vendor.lower()
 
-        # ------------------------------------------------------------------
+        # =============================================================================
         # 4) Randomized / locally-administered MACs
-        # ------------------------------------------------------------------
+        # =============================================================================
         is_random = False
         try:
             is_random = _is_locally_administered(mac_norm)
@@ -4353,9 +4229,9 @@ class App(tk.Tk):
             # Fallback to whatever vendor text we have, or generic
             return vendor or "Random"
 
-        # ------------------------------------------------------------------
+        # =============================================================================
         # 5) Normal (non-random) MACs
-        # ------------------------------------------------------------------
+        # =============================================================================
         # 5a) If we have a label, show label, with extra info in brackets if useful.
         if label:
             # If vendor is something meaningful (not Unknown), show it.
@@ -4438,7 +4314,8 @@ class App(tk.Tk):
         _HOSTNAMES.set_alias(ip, new_name)
         self.status.set(f"Hostname alias {'updated' if (new_name or '').strip() else 'cleared'} for {ip}.")
         # Light refresh so the Local column reflects the new alias; do not force sort
-        self.after(10, self._refresh_ui)
+        #self.after(10, self._refresh_ui)
+        self._reschedule_refresh()
 
     # --- [SSH|RESTART] _restart_ssh_collector ------------------------------
     def _restart_ssh_collector(self):
@@ -4692,7 +4569,7 @@ class App(tk.Tk):
 
         def save_name():
             self._set_label_for_mac(row["local_mac"], name_var.get())
-            self._refresh_ui()
+            self._reschedule_refresh(0)
 
         ttk.Button(win, text="Save Name", command=save_name).pack(pady=10)
 
@@ -4703,17 +4580,6 @@ class App(tk.Tk):
         ttk.Button(actions, text="WHOIS", command=lambda: webbrowser.open(f"https://whois.domaintools.com/{row['remote']}")).grid(row=0, column=1, padx=5)
 
 # endregion UI LAYER
-
-# -------------------- Offline MAC → Vendor resolver (enhanced) --------------------
-
-# --- [] _candidate_vendor_files --------------------------------------        
-def _candidate_vendor_files() -> list[Path]:
-    here = BASE_DIR
-    return [
-        here / "mac-vendor.txt",
-        here / "data" / "mac-vendor-overrides.txt",
-        Path.home() / ".cache" / "mac-vendor.txt",
-    ]
 
 # --- [OUI] _normalize_oui_text -------------------------------------- 
 def _normalize_oui_text(s: str) -> str:
@@ -4748,7 +4614,7 @@ def _is_locally_admin(mac: str) -> bool:
     """
     True if the MAC is locally administered (randomized) — i.e., U/L bit set.
     """
-    mac_norm = _normalize_mac(mac)
+    mac_norm = normalize_mac(mac)
     if len(mac_norm) != 17:
         return False
     first_octet_hex = mac_norm[:2]

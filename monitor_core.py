@@ -1,5 +1,10 @@
 # monitor_core.py
 
+# =============================================================================
+# SECTION: IMPORTS & GLOBALS
+# =============================================================================
+# region IMPORTS & GLOBALS
+
 from __future__ import annotations
 
 # --- Standard library imports that MonitorCore uses ---
@@ -7,12 +12,12 @@ import csv
 import ipaddress
 import threading
 import time
-from datetime import datetime
 import socket
 import queue
 import struct
 import traceback
 
+from datetime import datetime
 from typing import Any, Iterable, Optional
 from collections import defaultdict
 from collectors import ConntrackCollectorSSH
@@ -21,6 +26,8 @@ from collectors import ConntrackCollectorSSH
 from collectors import ConntrackCollectorSSH   # if used inside MonitorCore
 # from collectors import NetflowV5Collector    # only if MonitorCore touches it directly
 
+# endregion IMPORTS & GLOBALS
+
 # If MonitorCore calls any SNMP helpers / OID functions, import them:
 # from snmp_helpers import (
 #     _merge_ip2mac_from_snmp,
@@ -28,9 +35,18 @@ from collectors import ConntrackCollectorSSH   # if used inside MonitorCore
 #     ...
 # )
 
-# --- Logging-related constants (used only by MonitorCore) ---
-LOG_FILENAME = "traffic_log.csv"
-ALERT_LOG_FILENAME = "alerts_log.csv"
+from app_paths import (
+    BASE_DIR,
+    DATA_DIR,
+    CONFIG_FILE,
+    SSH_SECRETS_FILE,
+    LOG_FILENAME,
+    ALERT_LOG_FILENAME,
+    BASE_OUI_FILE,
+    OVERRIDE_OUI_FILE,
+    HOST_ALIAS_PATH,
+    MAC_LABELS_PATH,
+)
 
 # If you had LOG_HEADERS / ALERT_HEADERS, move them here too:
 # LOG_HEADERS = [...]
@@ -257,7 +273,6 @@ class MonitorCore:
             return mac
         except Exception:
             return None
-
 
     # =============================================================================
     # SECTION: STORAGE (files, CSV/JSON, load/save)
@@ -578,7 +593,9 @@ class MonitorCore:
                 self._refresh_arp()
                 cnt = len(self.ip2mac)
                 if self._last_ip2mac_count != cnt:
-                    print(f"[SNMP] ip2mac entries: {cnt}")
+                    msg = f"[SNMP] ip2mac entries: {cnt}"
+                    if DEBUG:
+                        print(msg)
                     self._last_ip2mac_count = cnt
                 self._update_connections()
             except Exception as e:

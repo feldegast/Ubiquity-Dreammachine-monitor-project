@@ -166,3 +166,7 @@ SNMP monitor project 2025-11-21-09-00.zip
 __pycache__/*.pyc
 *.zip
 .vscode/launch.json
+__pycache__/monitor_core.cpython-312.pyc
+helpers/__pycache__/hostname_resolver.cpython-312.pyc
+helpers/__pycache__/alias_manager.cpython-312.pyc
+__pycache__/monitor_core.cpython-312.pyc

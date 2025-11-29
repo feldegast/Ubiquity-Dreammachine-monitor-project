@@ -1,26 +1,14 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Dict, Optional
+
+from app_paths import BASE_OUI_FILE, OVERRIDE_OUI_FILE
 
 # =============================================================================
 # SECTION: VENDOR RESOLVER (MAC → Vendor/OUI lookup)
 # =============================================================================
 # region VENDOR RESOLVER
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-
-# Downloaded OUI database (TAB-separated)
-BASE_OUI_FILE = DATA_DIR / "mac-vendor.txt"
-
-# Local overrides (CSV: OUI,Vendor Name...) – only first comma is significant
-OVERRIDE_OUI_FILE = DATA_DIR / "mac-vendor-overrides.txt"
 
 # ---------------------------------------------------------------------------
 # Normalisation helpers
@@ -33,21 +21,20 @@ _MAC_RE = re.compile(r"[0-9A-Fa-f]{2}")
 def _normalize_mac(mac: Optional[str]) -> Optional[str]:
     """Best-effort normalisation of a MAC string.
 
-    * Extracts hex pairs from any separator style (':', '-', '.', spaces)
+    * Extracts hex pairs from any separator style (':', '-', '.', spaces, etc)
     * Upper-cases everything
     * Returns the first 6 bytes as 'AA:BB:CC:DD:EE:FF'
     """
     if not mac:
         return None
 
-    # Grab raw hex pairs
     hex_pairs = _MAC_RE.findall(mac)
     if len(hex_pairs) < 3:  # need at least an OUI (3 bytes)
         return None
 
-    # We keep up to 6 bytes – extra pairs (in weird formats) are ignored
-    pairs = [p.upper() for p in hex_pairs[:6]]
-    return ":".join(pairs)
+    # At most 6 bytes (standard MAC length)
+    hex_pairs = hex_pairs[:6]
+    return ":".join(p.upper() for p in hex_pairs)
 
 
 def normalize_mac(mac: Optional[str]) -> Optional[str]:
@@ -82,52 +69,61 @@ def _normalize_oui(raw: str) -> Optional[str]:
 
 
 def _oui_from_normalized_mac(mac_norm: str) -> str:
-    """Return the OUI part ('AA:BB:CC') from a normalised MAC."""
+    """Given a normalised MAC 'AA:BB:CC:DD:EE:FF', return its OUI 'AA:BB:CC'."""
     parts = mac_norm.split(":")
     return ":".join(parts[:3]) if len(parts) >= 3 else mac_norm
 
 
-def _is_locally_administered(mac_norm: Optional[str]) -> bool:
-    """Return True if the MAC is locally administered (LAA).
-
-    We look at the second least significant bit of the first byte.
-    (See IEEE 802 MAC address format).
-    """
+# Locally administered bit: second least-significant bit of the first octet.
+# If that bit is 1, the MAC is "locally administered" (not a globally unique OUI).
+def _is_locally_administered(mac: Optional[str]) -> bool:
+    """Return True if the MAC is locally administered (U/L bit set)."""
+    mac_norm = _normalize_mac(mac)
     if not mac_norm:
         return False
 
     first_octet = mac_norm.split(":", 1)[0]
     try:
-        b0 = int(first_octet, 16)
+        value = int(first_octet, 16)
     except ValueError:
         return False
 
-    return bool(b0 & 0x02)
+    # U/L bit is bit 1 of the first octet (0x02)
+    return bool(value & 0x02)
 
 
 # ---------------------------------------------------------------------------
-# Loading OUI → Vendor mappings
+# OUI file loaders
 # ---------------------------------------------------------------------------
 
-def _load_base_ouis(path: Path) -> Dict[str, str]:
-    """Load the downloaded TAB-delimited OUI database.
+def _load_oui_file(path) -> Dict[str, str]:
+    """Load an OUI → Vendor mapping from a text file.
 
-    Expected format per line:
-        <OUI>\t<Vendor name>
+    Expected format per line (TAB *or* spaces between OUI and vendor):
 
-    * Lines starting with '#' are ignored
-    * OUI can be either 'D8:5E:D3', 'D8-5E-D3', 'D85ED3', etc.
+        <OUI><whitespace><Vendor name>
+
+    Examples:
+
+        000000    Xerox Corp
+        D85ED3\tGIGA-BYTE TECHNOLOGY CO., LTD.
+        AABBCC    Some Company
+
+    * Lines starting with '#' are ignored.
+    * OUI can be 'D8:5E:D3', 'D8-5E-D3', 'D85ED3', etc.
+    * Multiple spaces or tabs between OUI and name are fine.
     """
     mapping: Dict[str, str] = {}
 
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
 
-                parts = line.split("\t")
+                # Split on first run of whitespace (tabs or spaces)
+                parts = re.split(r"\s+", line, maxsplit=1)
                 if len(parts) < 2:
                     continue
 
@@ -142,47 +138,7 @@ def _load_base_ouis(path: Path) -> Dict[str, str]:
 
                 mapping[oui] = vendor
     except FileNotFoundError:
-        # It's fine – you'll just see 'Unknown' everywhere until the file exists
-        pass
-
-    return mapping
-
-
-def _load_override_ouis(path: Path) -> Dict[str, str]:
-    """Load local CSV overrides: 'OUI,Vendor Name...'.
-
-    Only the FIRST comma is treated as a separator so that vendor names
-    can contain commas, e.g.:
-
-        D8:5E:D3,GIGA-BYTE TECHNOLOGY CO., LTD.
-    """
-    mapping: Dict[str, str] = {}
-
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                # Only first comma is significant
-                if "," not in line:
-                    continue
-
-                prefix, vendor_raw = line.split(",", 1)
-                raw_oui = prefix.strip()
-                vendor = vendor_raw.strip()
-
-                if not raw_oui or not vendor:
-                    continue
-
-                oui = _normalize_oui(raw_oui)
-                if not oui:
-                    continue
-
-                mapping[oui] = vendor
-    except FileNotFoundError:
-        # Optional file – ignore if missing
+        # Missing file is OK – you'll just get 'Unknown' for those OUIs.
         pass
 
     return mapping
@@ -191,11 +147,11 @@ def _load_override_ouis(path: Path) -> Dict[str, str]:
 def _build_vendor_map() -> Dict[str, str]:
     """Build the final OUI → Vendor mapping.
 
-    1. Load the base TAB-delimited database (mac-vendor.txt)
-    2. Apply CSV overrides from mac-vendor-overrides.txt (overrides win)
+    1. Load the base OUI database (mac-vendor.txt)
+    2. Apply overrides from mac-vendor-overrides.txt (overrides win)
     """
-    base = _load_base_ouis(BASE_OUI_FILE)
-    overrides = _load_override_ouis(OVERRIDE_OUI_FILE)
+    base = _load_oui_file(BASE_OUI_FILE)
+    overrides = _load_oui_file(OVERRIDE_OUI_FILE)
 
     # Apply overrides last so they take precedence
     base.update(overrides)
@@ -206,14 +162,18 @@ def _build_vendor_map() -> Dict[str, str]:
 _VENDOR_BY_OUI: Dict[str, str] = _build_vendor_map()
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def vendor_for_mac(mac: Optional[str]) -> str:
     """Return the best-guess vendor name for a MAC address.
 
-    * Normalises the MAC
-    * Extracts its OUI ('AA:BB:CC')
+    * Normalises the MAC (AA:BB:CC:DD:EE:FF)
+    * Derives its OUI (AA:BB:CC)
     * Looks up in:
-        - data/mac-vendor.txt               (TAB-delimited)
-        - data/mac-vendor-overrides.txt     (CSV, OUI,Vendor Name...)
+        - mac-vendor.txt
+        - mac-vendor-overrides.txt
     * Returns 'Unknown' if nothing matches
     """
     mac_norm = _normalize_mac(mac)

@@ -108,7 +108,7 @@ def build_alerts_section(app, parent: "tk.Frame") -> None:
     import tkinter as tk
     from tkinter import ttk
 
-     # =============================================================================
+    # =============================================================================
     # Filter rows + legend area
     # =============================================================================
     # region Filter row
@@ -463,7 +463,8 @@ def build_active_section(app, parent: "tk.Frame") -> None:
     """
     Build the Active Connections section inside `parent`.
 
-    Attaches Treeview to app.tree and title var to app.active_title.
+    Canonical widget name: app.active
+    Backwards-compat alias: app.tree
     """
 
     import tkinter as tk
@@ -491,12 +492,13 @@ def build_active_section(app, parent: "tk.Frame") -> None:
         "over1mb":">1MB?",
     }
 
-    from main import DEBUG
-
+    # Only show State column in debug builds
+    DEBUG = getattr(app, "DEBUG", False)
     if DEBUG:
         active_labels["state"] = "State"
 
-    app.tree = ttk.Treeview(
+    # --- build the Treeview ---------------------------------------------
+    tv = ttk.Treeview(
         midf,
         columns=list(active_labels.keys()),
         show="tree headings",  # #0 = status icon
@@ -504,36 +506,47 @@ def build_active_section(app, parent: "tk.Frame") -> None:
         selectmode="browse",
     )
 
+    # Canonical + compat names
+    app.active = tv
+    app.tree = tv  # legacy name, so older code still works
+
     for col, label in active_labels.items():
-        app.tree.heading(col, text=label, anchor="center")
+        tv.heading(col, text=label, anchor="center")
 
     # Apply default widths via helper
-    apply_default_active_column_widths(app.tree, DEBUG)
+    apply_default_active_column_widths(tv, DEBUG)
 
     # Sorting
-    app._setup_sorting(app.tree, table_name="active", default_col="last", default_reverse=True)
+    app._setup_sorting(tv, table_name="active",
+                       default_col="last", default_reverse=True)
 
-    scry2 = ttk.Scrollbar(midf, orient="vertical", command=app.tree.yview)
-    app.tree.configure(yscrollcommand=scry2.set)
-    app.tree.pack(side="left", fill="both", expand=True, pady=8)
+    scry2 = ttk.Scrollbar(midf, orient="vertical", command=tv.yview)
+    tv.configure(yscrollcommand=scry2.set)
+    tv.pack(side="left", fill="both", expand=True, pady=8)
     scry2.pack(side="left", fill="y", padx=(0, 4), pady=8)
 
     # Edit-on-double-click
     if hasattr(app, "_bind_edit_on_doubleclick"):
         app._bind_edit_on_doubleclick(
-            app.tree,
+            tv,
             mac_col="mac",
             vendor_col="vendor",
             local_col="local",
         )
 
+    # Hide/show State column depending on debug mode
     if hasattr(app, "_apply_state_visibility"):
         app._apply_state_visibility()
 
-    app.tree.bind(
+    # Selection → details panel
+    tv.bind(
         "<<TreeviewSelect>>",
-        lambda e: app._update_details_from_tree(app.tree, "active"),
+        lambda e: app._update_details_from_tree(tv, "active"),
     )
+
+    # Right-click context menu: copy row / edit device label
+    if hasattr(app, "_on_right_click_active"):
+        tv.bind("<Button-3>", app._on_right_click_active)
 
 # endregion BUILD ACTIVE CONNECTIONS TABLE (middle table)
 
@@ -888,6 +901,7 @@ def refresh_aggregates_table(
         # Low-volume filter: drop devices below threshold when enabled
         if high_volume_only and total_bytes < ALERT_THRESHOLD_BYTES:
             continue
+        
         # endregion Filters
 
         # =============================================================================
