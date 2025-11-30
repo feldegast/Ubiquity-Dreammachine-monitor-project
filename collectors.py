@@ -339,3 +339,23 @@ class ConntrackCollectorSSH(threading.Thread):
             if m:
                 rows.append((m.group("ip"), m.group("mac")))
         return rows
+
+    # --- [SSH|DHCP/DNS] gfetch_dhcp_leases ------------------------------------
+    def fetch_dhcp_leases(self):
+        
+        # Local import to avoid circular dependency with monitor_core
+        from monitor_core import normalize_mac
+        
+        try:
+            out = self._ssh_exec("cat /run/dnsmasq/leases")
+            leases = {}
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    mac = normalize_mac(parts[1])
+                    ip  = parts[2]
+                    host = parts[3].strip("*")
+                    leases[ip] = {"mac": mac, "hostname": host}
+            return leases
+        except:
+            return {}

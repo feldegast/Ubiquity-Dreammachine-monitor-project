@@ -307,6 +307,11 @@ except Exception:
     #MacLookup = None
     AsyncMacLookup = None
 
+# =============================================================================
+# SECTION: MAC LABEL STORAGE (local labels / overrides)
+# =============================================================================
+# region: MAC LABEL STORAGE (local labels / overrides)
+
 # --- [NET] load_mac_labels ------------------------------------
 def load_mac_labels() -> dict:
     """
@@ -362,8 +367,6 @@ def save_mac_labels(labels: dict[str, str]) -> None:
         # Fail silently – UI should keep working even if write fails
         pass
     
-
-
 # --- [NET] _norm_mac ----------------------------------------
 def _norm_mac(mac: str) -> str:
     if not mac:
@@ -383,11 +386,14 @@ def _mac_oui(mac: str) -> str:
         return ""
     return ":".join(parts[:3])  # "AA:BB:CC"
 
+# endregion: MAC LABEL STORAGE (local labels / overrides)
+
 # --- [HOSTNAME|CORE] _HostnameResolver ---------------------------------
 from helpers.hostname_resolver import _HostnameResolver  # moved to helpers.hostname_resolver
 # =============================================================================
 # SECTION: HOSTNAME ALIAS RESOLVER (GLOBAL INSTANCE)
 # =============================================================================
+# region HOSTNAME ALIAS RESOLVER
 
 # This must appear BEFORE class App so Pylance sees it as defined,
 # and so App._display_local and other methods can use it.
@@ -412,6 +418,11 @@ _HOSTNAMES
 # region STORAGE
 # (storage lives inside MonitorCore; placeholder here for future refactor)``
 # endregion STORAGE
+
+# =============================================================================
+# SECTION: Secrets / SSH config
+# =============================================================================
+# region: Secrets / SSH config
 
 # --- [CONFIG] _load_secrets ------------------------------------
 def _load_secrets():
@@ -490,6 +501,8 @@ def _save_ssh_secrets(path: str, data: dict):
         print(f"[SSH|SAVE] Failed to write secrets: {e}")
         return False
 
+# endregion: Secrets / SSH config
+
 # =============================================================================
 # SECTION: ENRICHMENT (Vendor lookup, Device naming)
 # =============================================================================
@@ -518,14 +531,14 @@ def snmp_sanity():
     return ok, ifnames
 
 # =============================================================================
-# SECTION: NETWORK CORE (SNMP, ARP, conn tracking)
+# SECTION: NETWORK CORE
 # =============================================================================
-# region NETWORK CORE
+# region: NETWORK CORE
 
 # =============================================================================
-# SECTION: SNMP BACKEND (selection + helpers)
+# SECTION: SNMP backend selection & helpers
 # =============================================================================
-# region SNMP BACKEND
+# region SNMP backend selection & helpers
 
 # --- SNMP backend globals (module-level) ---
 _snmp_backend = None
@@ -538,8 +551,6 @@ def _snmp_walk_v2_pythonic(host, community, oid):
     client = Client(host, community=community)
     for vb in client.walk(oid):
         yield str(vb.oid), vb.value
-
-
 
 # --- [SNMP] _snmp_walk_v2_raw ------------------------------------
 def _snmp_walk_v2_raw(host, community, oid):
@@ -597,9 +608,15 @@ def snmp_walk(host, community, oid):
     if _snmp_backend is None:
         return iter(())  # graceful no-op if puresnmp unavailable
     return _snmp_backend(host, community, oid)
+
 monitor_core.snmp_walk = snmp_walk
 
-# endregion SNMP BACKEND
+# endregion SNMP backend selection & helpers
+
+# =============================================================================
+# SUBSECTION: ARP/IP-MIB parsing & UI prep
+# =============================================================================
+# region ARP/IP-MIB parsing & UI prep
 
 # numeric OIDs (no MIB files needed)
 OID_ifName                  = "1.3.6.1.2.1.31.1.1.1.1"      # IF-MIB::ifName
@@ -612,12 +629,6 @@ TCP_STATE = {
     5: 'established', 6: 'finWait1', 7: 'finWait2', 8: 'closeWait',
     9: 'lastAck', 10: 'closing', 11: 'timeWait', 12: 'deleteTCB'
 }
-
-# =============================================================================
-# SECTION: NETWORK CORE (SNMP, ARP, conn tracking)
-# =============================================================================
-# region NETWORK CORE
-
 # Additional MAC source: IP-MIB::ipNetToPhysicalPhysAddress
 # OID: 1.3.6.1.2.1.4.35.1.4 .<ifIndex>.<addrType>.<addrLen>.<addrOctets...>
 # For IPv4 rows: addrType=1, addrLen=4, then a.b.c.d
@@ -766,13 +777,13 @@ monitor_core.OID_atPhysAddress                = OID_atPhysAddress
 monitor_core.snmp_walk = snmp_walk
 monitor_core.walk_tcp_connections = walk_tcp_connections
 monitor_core.DEBUG = DEBUG
+# endregion ARP/IP-MIB parsing & UI prep
+# endregion: NETWORK CORE
 
 # =============================================================================
-# SECTION: UTILITIES (helpers, formatting, parsing)
+# SECTION: UTILITIES - DNS / rDNS / utilities
 # =============================================================================
-# region UTILITIES
-
-
+# region: UTILITIES - DNS / rDNS / utilities
 
 # --- [DNS|WORKER] dns_worker ------------------------------------
 def dns_worker(dns_q: "queue.Queue[str]"):
@@ -826,15 +837,12 @@ def tail_file(path: str, max_lines: int) -> str:
     except Exception:
         return ""
 
-# clipboard helpers
-# endregion UTILITIES
+# endregion UTILITIES - DNS / rDNS / utilities
 
 # ---- NetFlow v5 collector (simple, fixed-format parser) ----
 # NetFlow v5 packet format reference
 NFV5_HEADER_FMT = "!HHIIIIBBH"   # version(2), count(2), sys_uptime(4), unix_secs(4), unix_nsecs(4), flow_seq(4), engine_type(1), engine_id(1), sampling(2)
 NFV5_RECORD_FMT = "!IIIHHIIIIHHBBBBHHBBH"  # 48 bytes per record
-
-# endregion NETWORK CORE
 
 # =============================================================================
 # SECTION: DATA MODELS (types, dataclasses)
@@ -1568,6 +1576,16 @@ class App(tk.Tk):
             or row.get("vendor", "")
             or ""
         )
+
+        # Optional: augment with router DHCP hostname (via SSH) if available
+        router_host = self._router_hostname_for_ip(local_ip)
+        if router_host:
+            # Avoid duplicating if the router hostname is already part of the string
+            if router_host.lower() not in display_name.lower():
+                if display_name:
+                    display_name = f"{display_name} [{router_host}]"
+                else:
+                    display_name = router_host
 
         # endregion: 4) Vendor / name – use our display helper (aliases, labels, etc.)
         
@@ -2485,7 +2503,6 @@ class App(tk.Tk):
         # endregion AAggregates (bottom of left content)
         
         # endregion UI.CONTENT (everything that scrolls/expands)
-# endregion UI WIDGETS
 
     # =============================================================================
     # SECTION: UI CONTROLLER (events, handlers, refresh loop)
@@ -2788,7 +2805,6 @@ class App(tk.Tk):
         }
 
     # --- [UI|VENDOR STATUS CLASSIFIER] _vendor_status_for_mac -----------
-    # --- [UI|VENDOR STATUS CLASSIFIER] _vendor_status_for_mac -----------
     def _vendor_status_for_mac(self, mac: str | None) -> str:
         """
         Return one of: 'labelled', 'known', 'laa', 'unknown'.
@@ -2879,6 +2895,92 @@ class App(tk.Tk):
         # Nothing else matched → unknown
         return "unknown"
         # endregion 3) Fallback: vendor-based classification
+
+    # --- [UI|HOSTNAMES] _router_hostname_for_ip ------------------------------
+    def _router_hostname_for_ip(self, ip: str | None) -> str:
+        """
+        Look up the DHCP hostname for a given local IP by asking the SSH
+        collector (ConntrackCollectorSSH) to parse /run/dnsmasq/leases.
+
+        Returns "" if:
+          - no IP is given,
+          - there is no SSH collector,
+          - the router doesn't have a lease/hostname for that IP,
+          - or anything goes wrong.
+        """
+        if not ip:
+            return ""
+
+        try:
+            # Local import to avoid any circular import tangles
+            from collectors import ConntrackCollectorSSH
+
+            core = getattr(self, "core", None)
+            if core is None:
+                return ""
+
+            nf = getattr(core, "nf", None)
+            if not isinstance(nf, ConntrackCollectorSSH):
+                # No SSH conntrack collector → nothing to ask
+                return ""
+
+            # Ask the collector for the current DHCP lease map
+            leases = nf.fetch_dhcp_leases()
+            entry = leases.get(ip)
+            if not entry:
+                return ""
+
+            host = (entry.get("hostname") or "").strip().strip("*")
+            if not host:
+                return ""
+            return host
+
+        except Exception:
+            # Never let hostname lookup kill the UI
+            return ""
+
+    # --- [UI|HOSTNAMES] _router_hostname_for_ip ------------------------------
+    def _router_hostname_for_ip(self, ip: str | None) -> str:
+        """
+        Look up the DHCP hostname for a given local IP by asking the SSH
+        collector (ConntrackCollectorSSH) to parse /run/dnsmasq/leases.
+
+        Returns "" if:
+          - no IP is given,
+          - there is no SSH collector,
+          - the router doesn't have a lease/hostname for that IP,
+          - or anything goes wrong.
+        """
+        if not ip:
+            return ""
+
+        try:
+            # Local import to avoid any circular import tangles
+            from collectors import ConntrackCollectorSSH
+
+            core = getattr(self, "core", None)
+            if core is None:
+                return ""
+
+            nf = getattr(core, "nf", None)
+            if not isinstance(nf, ConntrackCollectorSSH):
+                # No SSH conntrack collector → nothing to ask
+                return ""
+
+            # Ask the collector for the current DHCP lease map
+            leases = nf.fetch_dhcp_leases()
+            entry = leases.get(ip)
+            if not entry:
+                return ""
+
+            host = (entry.get("hostname") or "").strip().strip("*")
+            if not host:
+                return ""
+            return host
+
+        except Exception:
+            # Never let hostname lookup kill the UI
+            return ""
 
     # --- [UI|VENDOR STATUS ICON LOOKUP] _status_icon_for_mac ---------------
     def _status_icon_for_mac(self, mac: str | None) -> tk.PhotoImage | None:
@@ -4075,15 +4177,17 @@ class App(tk.Tk):
     # --- [UI|COPY|DEBUG] _copy_debug_bundle ------------------------------------
     def _copy_debug_bundle(self):
         # Build a single text payload with:
-        # - Active (top N)
-        # - Aggregates (top N)
-        # - env info (versions & config)
-        # - Top NetFlow flows (if collector is running)
-        # - Tail of traffic_log.csv
+        # - Environment info (versions, SNMP backend, config)
+        # - Active connections (top N)  → now using App._display_name()
+        # - Connected devices summary   → one line per MAC using App._display_name()
+        #
+        # All text is tab-separated for easy pasting into a text editor / Excel.
 
-        parts = []
+        parts: list[str] = []
 
-        # 1) Env block
+        # =============================================================================
+        # 1) Environment block (unchanged)
+        # =============================================================================
         try:
             import platform, sys as _sys
             try:
@@ -4096,31 +4200,49 @@ class App(tk.Tk):
                     puresnmp_ver = _md.version("puresnmp")
                 except Exception:
                     pass
+
             env = [
                 "=== Environment ===",
+                f"App: {APP_NAME}",
+                f"Version: {VERSION}  ({VERSION_DATE})",
                 f"Python: {platform.python_version()} ({platform.system()} {platform.release()})",
-                f"puresnmp: {puresnmp_ver}",
+                f"Executable: {getattr(_sys, 'executable', '')}",
                 f"SNMP backend: {get_snmp_backend_name()}",
+                f"puresnmp: {puresnmp_ver}",
                 f"Router IP: {ROUTER_IP}",
                 f"Community: {SNMP_COMMUNITY}",
                 f"Poll Interval (s): {POLL_INTERVAL_SECONDS}",
-                f"NetFlow v5 collector: {'ON' if getattr(self, 'nf', None) else 'OFF'} on {NETFLOW_LISTEN_IP}:{NETFLOW_LISTEN_PORT}",
+                f"NetFlow v5 collector: "
+                f"{'ON' if getattr(self, 'nf', None) else 'OFF'} on {NETFLOW_LISTEN_IP}:{NETFLOW_LISTEN_PORT}",
                 "",
             ]
             parts.append("\n".join(env))
         except Exception:
+            # Environment info is nice-to-have only – ignore failures.
             pass
 
-        # 2) Active table via core (normalized)
-        header = ["Local", "MAC", "Vendor", "Remote", "State", "First Seen", "Last Seen", "Bytes (TX)", ">1MB?"]
+        # =============================================================================
+        # 2) Active connections (via core, normalized), now using _display_name
+        # =============================================================================
+        header = [
+            "Local",
+            "MAC",
+            "Vendor/Host (via _display_name)",
+            "Remote",
+            "State",
+            "First Seen",
+            "Last Seen",
+            "Bytes (TX)",
+            ">1MB?",
+        ]
         rows = ["\t".join(header)]
 
-        def _fmt_local(rec):
+        def _fmt_local(rec: dict) -> str:
             lip = rec.get("local_ip") or rec.get("src_ip") or ""
             lpt = rec.get("local_port") or rec.get("src_port")
             return f"{lip}:{lpt}" if lip and lpt is not None else str(lip)
 
-        def _fmt_remote(rec):
+        def _fmt_remote(rec: dict) -> str:
             rip = rec.get("remote_ip") or rec.get("dst_ip") or ""
             rpt = rec.get("remote_port") or rec.get("dst_port")
             host = rec.get("remote_host") or rec.get("rdns") or rec.get("hostname")
@@ -4128,30 +4250,152 @@ class App(tk.Tk):
             base = f"{rip}{host_part}"
             return f"{base}:{rpt}" if rip and rpt is not None else base
 
-        def _fmt_bytes(n):
+        def _fmt_bytes(n) -> str:
             try:
                 return str(int(n))
             except Exception:
                 return str(n or 0)
 
+        # Let core normalize the rows first
         recs = self.core.get_active_rows_prepared(limit=COPY_LIMIT_ROWS)
         for rec in recs:
             local = _fmt_local(rec)
             mac = rec.get("local_mac") or ""
-            vendor = rec.get("vendor") or "Unknown"
+            vendor_raw = rec.get("vendor") or "Unknown"
+
+            # NEW: use the same logic as the UI details panel / tables
+            # so DNS / alias / DHCP hostname are included if available.
+            try:
+                vendor_disp = self._display_name(
+                    rec.get("local_ip") or rec.get("src_ip"),
+                    mac,
+                    vendor_raw,
+                )
+            except Exception:
+                vendor_disp = vendor_raw
+
             remote = _fmt_remote(rec)
             state = rec.get("state") or rec.get("tcp_state") or ""
             first_seen = rec.get("first_seen") or ""
             last_seen = rec.get("last_seen") or ""
             raw_bytes = rec.get("bytes") or rec.get("bytes_tx") or 0
             btx = _fmt_bytes(raw_bytes)
-            over = "Yes" if isinstance(raw_bytes, (int, float)) and raw_bytes >= 1_048_576 else "No"
-            rows.append("\t".join([local, mac, vendor, remote, state, str(first_seen), str(last_seen), btx, over]))
+            over = (
+                "Yes"
+                if isinstance(raw_bytes, (int, float)) and raw_bytes >= ALERT_THRESHOLD_BYTES
+                else "No"
+            )
 
-        parts.append("=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS) + "\n".join(rows) + "\n")
+            rows.append(
+                "\t".join(
+                    [
+                        local,
+                        mac,
+                        vendor_disp or vendor_raw or "Unknown",
+                        remote,
+                        str(state),
+                        str(first_seen),
+                        str(last_seen),
+                        btx,
+                        over,
+                    ]
+                )
+            )
 
-        # (Optional) add more parts here (aggregates, tail of logs, etc.)
+        parts.append(
+            "=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS)
+            + "\n".join(rows)
+            + "\n"
+        )
 
+        # =============================================================================
+        # 3) Connected devices summary (one line per MAC) using _display_name
+        # =============================================================================
+        try:
+            core = self.core
+        except Exception:
+            core = None
+
+        if core is not None:
+            # mac_norm -> set of IPs
+            mac_to_ips: dict[str, set[str]] = {}
+
+            # 3a) Devices from ARP / ip2mac
+            for ip, mac in getattr(core, "ip2mac", {}).items():
+                mac_norm = normalize_mac(mac or "")
+                if not mac_norm:
+                    continue
+                mac_to_ips.setdefault(mac_norm, set()).add(ip)
+
+            # 3b) Devices from aggregates
+            for mac in getattr(core, "aggregates", {}).keys():
+                mac_norm = normalize_mac(mac or "")
+                if not mac_norm:
+                    continue
+                mac_to_ips.setdefault(mac_norm, set())
+
+            # 3c) Devices seen in the active rows we just used
+            for rec in recs:
+                mac_norm = normalize_mac(rec.get("local_mac") or "")
+                if not mac_norm:
+                    continue
+                ip = rec.get("local_ip") or rec.get("src_ip") or ""
+                if ip:
+                    mac_to_ips.setdefault(mac_norm, set()).add(ip)
+
+            if mac_to_ips:
+                dev_header = ["MAC", "IP(s)", "DisplayName (App._display_name)", "Status"]
+                dev_rows = ["\t".join(dev_header)]
+
+                for mac_norm in sorted(mac_to_ips.keys()):
+                    ips = sorted(mac_to_ips[mac_norm])
+                    primary_ip = ips[0] if ips else None
+
+                    # Use the same helper as the right-hand panel / tables.
+                    try:
+                        name = self._display_name(primary_ip, mac_norm)
+                    except Exception as e:
+                        name = f"(error from _display_name: {e})"
+
+                    # Optional: vendor status (unknown / laa / known / labelled)
+                    status = ""
+                    try:
+                        if hasattr(self, "_vendor_status_for_mac"):
+                            status = self._vendor_status_for_mac(mac_norm)
+                    except Exception:
+                        status = ""
+
+                    dev_rows.append(
+                        "\t".join(
+                            [
+                                mac_norm,
+                                ", ".join(ips) if ips else "-",
+                                name or "",
+                                status,
+                            ]
+                        )
+                    )
+
+                parts.append(
+                    "=== Connected Devices (via _display_name) ===\n"
+                    + "\n".join(dev_rows)
+                    + "\n"
+                )
+
+        # =============================================================================
+        # 4) (Optional) You can still add tails of log files etc. here later
+        # =============================================================================
+        # Example (left commented so we don't change behaviour without you opting in):
+        #
+        # log_tail = tail_file(LOG_FILENAME, DEBUG_LOG_TAIL_LINES)
+        # if log_tail:
+        #     parts.append("=== Tail of traffic log ===\n" + log_tail + "\n")
+        #
+        # alert_tail = tail_file(ALERT_LOG_FILENAME, DEBUG_LOG_TAIL_LINES)
+        # if alert_tail:
+        #     parts.append("=== Tail of alert log ===\n" + alert_tail + "\n")
+
+        # Final clipboard copy
         self._copy_to_clipboard("\n".join(parts), "Debug bundle copied")
 
     # --- [UI|TEXT] _display_name ----------------------------------------------
@@ -4162,15 +4406,20 @@ class App(tk.Tk):
         Priority:
           1) MAC label (from local_mac_labels.json)
           2) Host alias for the *local* IP (local_ip_labels.json)
-          3) Vendor name (from OUI DB / overrides)
-          4) 'Unknown'
+          3) Router DHCP hostname (via SSH, if available)
+          4) Vendor name (from OUI DB / overrides)
+          5) 'Unknown'
     
         Also handles randomized / locally-administered MACs by annotating with "(Random)".
         """
-    
-        # 🔧 REQUIRED FIX — import helpers locally
-        from vendor_resolver import vendor_for_mac, _is_locally_administered
-        from monitor_core import normalize_mac
+
+        from vendor_resolver import _is_locally_administered, vendor_for_mac
+        from vendor_resolver import _normalize_mac as normalize_mac
+        try:
+            # optional – only present when SSH conntrack is used
+            from collectors import ConntrackCollectorSSH  # type: ignore
+        except Exception:
+            ConntrackCollectorSSH = None  # type: ignore
 
         mac_norm = normalize_mac(mac or "")
         vendor = (vendor or "").strip()
@@ -4198,6 +4447,30 @@ class App(tk.Tk):
 
             if isinstance(alias_map, dict):
                 alias_name = (alias_map.get(local_ip) or "").strip()
+
+        # =============================================================================
+        # 2b) Router DHCP hostname (via SSH -> dnsmasq leases), if no alias
+        # =============================================================================
+        dhcp_name = ""
+        if local_ip and not alias_name:
+            try:
+                core = getattr(self, "core", None)
+                nf = getattr(core, "nf", None) if core is not None else None
+
+                if ConntrackCollectorSSH is not None and isinstance(nf, ConntrackCollectorSSH):
+                    # lightweight call – only when user opens row details
+                    leases = nf.fetch_dhcp_leases()
+                    if isinstance(leases, dict):
+                        entry = leases.get(local_ip)
+                        if isinstance(entry, dict):
+                            dhcp_name = (entry.get("hostname") or "").strip()
+            except Exception:
+                dhcp_name = ""
+
+        # If we got a DHCP hostname and no explicit alias, treat it like an alias
+        if not alias_name and dhcp_name:
+            alias_name = dhcp_name
+
         # =============================================================================
         # 3) Vendor lookup (if not supplied)
         # =============================================================================
@@ -4242,7 +4515,7 @@ class App(tk.Tk):
                 return f"{label} ({alias_name})"
             return label
 
-        # 5b) No label, but we have an alias → show alias, with vendor if it’s helpful.
+        # 5b) No label, but we have an alias/DHCP hostname
         if alias_name:
             if vendor and vendor != "Unknown":
                 return f"{alias_name} ({vendor})"

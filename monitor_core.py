@@ -20,11 +20,12 @@ import traceback
 from datetime import datetime
 from typing import Any, Iterable, Optional
 from collections import defaultdict
-from collectors import ConntrackCollectorSSH
 
 # --- Project imports (SNMP helpers, collectors) ---
 from collectors import ConntrackCollectorSSH   # if used inside MonitorCore
 # from collectors import NetflowV5Collector    # only if MonitorCore touches it directly
+
+from vendor_resolver import normalize_mac
 
 # endregion IMPORTS & GLOBALS
 
@@ -201,24 +202,6 @@ def _walk_ipnet_physical():
 def walk_tcp_connections() -> list[dict[str, Any]]:
     """Placeholder; real implementation is wired in from main.py."""
     return []
-
-# --- [IP-MIB] normalize_mac ------------------------------------
-# --- [NET] normalize_mac ------------------------------------
-def normalize_mac(mac) -> str:
-    """Return normalized 'AA:BB:CC:DD:EE:FF' or '' for empties/zeros."""
-    if mac is None:
-        return ""
-    s = str(mac).strip().upper().replace("-", ":")
-    if not s:
-        return ""
-    # Raw 12-hex like AABBCCDDEEFF
-    if ":" not in s and len(s) == 12:
-        s = ":".join(s[i:i+2] for i in range(0, 12, 2))
-    if s.replace(":", "").replace("-", "") in {"000000000000"}:
-        return ""
-    if s in ZERO_MACS:
-        return ""
-    return s
 
 def vendor_for_mac(mac: Optional[str]) -> str:
     """
