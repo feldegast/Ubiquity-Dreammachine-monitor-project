@@ -227,6 +227,12 @@ class MonitorCore:
         # Lightweight debug counters for the status line
         self.last_counts = {"arp": 0, "tcp": 0, "flows": 0}
 
+        # Startup progress state (read by the UI for the 6-step dialog)
+        self.startup_total_steps = 6
+        self.startup_step_index = 0
+        self.startup_step_label = ""
+        self.startup_done = False
+
         self._log_init()
 
         self.alert_q = queue.Queue()
@@ -241,6 +247,15 @@ class MonitorCore:
                                 "remote_ip","remote_port","hostname","bytes_tx","note"])
         except Exception:
             pass
+
+    # --- [CORE|INIT] _set_startup_step ------------------------------------
+    def _set_startup_step(self, index: int, label: str) -> None:
+        """
+        Record the current startup phase for the UI.
+        Called only from the core thread; the UI reads these fields.
+        """
+        self.startup_step_index = index
+        self.startup_step_label = label
 
     # --- MAC Lookup (simple version) ------------------------------------
     def get_mac_for_ip(self, ip: str) -> str | None:
@@ -395,8 +410,15 @@ class MonitorCore:
 
     # --- [CORE|UPDATE] _update_connections ------------------------------------
     # Purpose: Build connections from NetFlow/conntrack; update conn_map, aggregates, alerts
-    def _update_connections(self):
+    def _update_connections(self, startup: bool = False):
         now_iso = datetime.now().isoformat(timespec="seconds")
+
+        if startup:
+            # Step 4: we’re about to read conntrack / NetFlow / TCP stats
+            try:
+                self._set_startup_step(4, "Read conntrack / netstat / NetFlow")
+            except Exception:
+                pass
 
         conns: list[dict[str, Any]] = []
         flow_map_size = 0
@@ -519,6 +541,13 @@ class MonitorCore:
                 agg["sightings"] += 1
                 agg["bytes"] = max(agg["bytes"], rec["bytes_tx"] or 0)
 
+        if startup:
+            # Step 5: enrichment finished (MAC / vendor / labels applied)
+            try:
+                self._set_startup_step(5, "Enrich rows with MAC/vendor/labels")
+            except Exception:
+                pass
+
             if DEBUG:
                 print("[DEBUG] core conn_map size:", len(self.conn_map))
 
@@ -571,6 +600,46 @@ class MonitorCore:
 
     # --- [CORE|LOOP] run ------------------------------------
     def run(self):
+        """
+        Core loop:
+
+        - First, perform a one-time startup cycle and expose progress in 6 steps:
+            1/6 Starting backend data collection
+            2/6 Initialise the data backend
+            3/6 Initial ARP/IP-MIB/neighbor walk
+            4/6 Read conntrack / netstat / NetFlow
+            5/6 Enrich rows with MAC/vendor/labels
+            6/6 Waiting for data...
+
+        - Then, enter the normal polling loop (refresh ARP + connections).
+        """
+        # --- One-time startup sequence (for UI progress dialog) ------------
+        try:
+            # 1/6
+            self._set_startup_step(1, "Starting backend data collection")
+
+            # 2/6
+            self._set_startup_step(2, "Initialise the data backend")
+            # (Backend init largely happens lazily inside the SNMP helpers.)
+
+            # 3/6
+            self._set_startup_step(3, "Initial ARP/IP-MIB/neighbor walk")
+            self._refresh_arp()
+
+            # 4/6 and 5/6 are driven from inside _update_connections(startup=True)
+            self._update_connections(startup=True)
+
+            # 6/6
+            self._set_startup_step(6, "Waiting for data...")
+
+        except Exception as e:
+            print("[CORE STARTUP EXCEPTION]", e)
+            traceback.print_exc()
+            # In case of failure, mark startup done so UI doesn’t wait forever
+        finally:
+            self.startup_done = True
+
+        # --- Normal polling loop ------------------------------------------
         while not self.stop.is_set():
             try:
                 self._refresh_arp()

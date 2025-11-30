@@ -18,6 +18,8 @@ import threading
 import time
 import webbrowser
 
+
+
 from ui_tables import (
     COL_W_FIRST,
     COL_W_MAC,
@@ -54,6 +56,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Iterable, Dict, Optional
 from tkinter import filedialog
+
 
 from collections import defaultdict
 from collectors import NetflowV5Collector, ConntrackCollectorSSH
@@ -872,6 +875,7 @@ from tkinter import simpledialog  # ensure this exists if you use the naming pro
 import tkinter as tk
 from tkinter import ttk
 import tkinter.messagebox as messagebox
+import tkinter.font as tkfont
 
 class App(tk.Tk):
     
@@ -959,6 +963,15 @@ class App(tk.Tk):
         """
         super().__init__()
         
+        # Early status so we can show startup progress even before _build_ui()
+        # (build_ui will see these and NOT overwrite them because of hasattr checks)
+        self.note = tk.StringVar(value="Starting collectors…")
+        self.status = tk.StringVar(value="Starting up…")
+        self._startup_seen_data = False  # flips to True once we see first rows
+
+        # Apply DPI scaling before we build any UI or set fonts
+        self._auto_dpi_scaling()
+        
         # Apply DPI scaling before we build any UI or set fonts
         self._auto_dpi_scaling()
         
@@ -1039,6 +1052,13 @@ class App(tk.Tk):
         
         self.thread = threading.Thread(target=self.core.run, daemon=True)
         self.thread.start()
+
+        # Track when we've actually seen live data (used to close the popup)
+        self._startup_seen_data = False
+
+        # Show a large, easy-to-read startup dialog in the centre of the window.
+        # Slight delay so the main window has a sensible size and position.
+        self.after(500, self._open_startup_dialog)
         
         # Ensure we save prefs on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1808,6 +1828,244 @@ class App(tk.Tk):
         x = max(0, (sw - w) // 2)
         y = max(0, (sh - h) // 2 + offset_y)
         self.geometry(f"{w}x{h}+{x}+{y}")
+
+    # --- [UI|STARTUP] update dialog from MonitorCore --------------------
+    def _update_startup_dialog(self):
+        """
+        Refresh the 6-step startup dialog from MonitorCore.startup_*.
+
+        This method ONLY updates the text/markers. The dialog is actually
+        closed from _refresh_ui once live data appears.
+        """
+        dlg = getattr(self, "_startup_dialog", None)
+        if dlg is None:
+            return
+        try:
+            if not dlg.winfo_exists():
+                return
+        except Exception:
+            return
+
+        core = getattr(self, "core", None)
+        if core is None:
+            self.after(250, self._update_startup_dialog)
+            return
+
+        total = getattr(core, "startup_total_steps", 6) or 6
+        idx = getattr(core, "startup_step_index", 0)
+        label = getattr(core, "startup_step_label", "")
+        done_core = getattr(core, "startup_done", False)
+
+        steps = getattr(self, "_startup_steps", [])
+        labels = getattr(self, "_startup_step_labels", [])
+
+        # Update each line: ✓ for completed, → for current, plain for pending.
+        for i, (step_text, lbl) in enumerate(zip(steps, labels), start=1):
+            # Prefer dynamic label for the current step, if provided by core
+            text_for_line = label if (i == idx and label) else step_text
+
+            if i < idx:
+                prefix = "✓ "
+            elif i == idx and not done_core:
+                prefix = "→ "
+            elif i == idx and done_core:
+                prefix = "✓ "
+            else:
+                prefix = "  "
+
+            lbl.configure(text=f"{prefix}{i}/{total} {text_for_line}")
+
+        # Keep polling until someone (refresh_ui) closes the dialog
+        self.after(250, self._update_startup_dialog)
+
+
+    def _center_startup_dialog(self):
+        """Center the startup dialog after it has been mapped."""
+        dlg = getattr(self, "_startup_dialog", None)
+        if dlg is None:
+            if DEBUG:
+                print("[DEBUG] _center_startup_dialog: no dialog object")
+            return
+        try:
+            if not dlg.winfo_exists():
+                if DEBUG:
+                    print("[DEBUG] _center_startup_dialog: dialog no longer exists")
+                return
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] _center_startup_dialog: winfo_exists exception: {e}")
+            return
+
+        # Ensure geometry is up-to-date
+        self.update_idletasks()
+        dlg.update_idletasks()
+
+        dlg_w = dlg.winfo_width()
+        dlg_h = dlg.winfo_height()
+
+        app_w = self.winfo_width()
+        app_h = self.winfo_height()
+        app_x = self.winfo_rootx()
+        app_y = self.winfo_rooty()
+
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+
+        # Prefer centring over the app window; fall back to screen centre
+        if app_w > 1 and app_h > 1:
+            target_x = app_x + (app_w - dlg_w) // 2
+            target_y = app_y + (app_h - dlg_h) // 2 - 40  # nudge up a bit
+            method = "APP-CENTER"
+        else:
+            target_x = (sw - dlg_w) // 2
+            target_y = (sh - dlg_h) // 2
+            method = "SCREEN-CENTER"
+
+        dlg.geometry(f"+{target_x}+{target_y}")
+        dlg.update_idletasks()
+
+        if DEBUG:
+            dlg_x = dlg.winfo_rootx()
+            dlg_y = dlg.winfo_rooty()
+            print(
+                f"[DEBUG] _center_startup_dialog: method={method}, "
+                f"target=({target_x}, {target_y}), actual=({dlg_x}, {dlg_y})"
+            )
+
+    # --- [UI|STARTUP] 6-step startup dialog -----------------------------
+    def _open_startup_dialog(self):
+        """
+        Show a centred dialog with the 6 backend-startup steps.
+
+        Progress data is read from:
+            core.startup_step_index
+            core.startup_step_label
+            core.startup_total_steps
+
+        The dialog is auto-closed by _refresh_ui once live data appears.
+        """
+        # Only create once
+        if getattr(self, "_startup_dialog", None) is not None:
+            try:
+                if self._startup_dialog.winfo_exists():
+                    return
+            except Exception:
+                self._startup_dialog = None
+
+        core = getattr(self, "core", None)
+        if core is None:
+            # Core not ready yet; try again shortly
+            self.after(300, self._open_startup_dialog)
+            return
+
+        dlg = tk.Toplevel(self)
+        self._startup_dialog = dlg
+        dlg.title("Initialising backend")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+
+        # Make it appear above the main window (without being hard-modal)
+        dlg.lift()
+        try:
+            dlg.attributes("-topmost", True)
+            dlg.after(10, lambda: dlg.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        # Slightly larger font for readability
+        base_font = tkfont.nametofont("TkDefaultFont")
+        big_font = base_font.copy()
+        big_font.configure(size=max(base_font.cget("size") + 2, 12))
+        self._startup_font = big_font
+
+        container = ttk.Frame(dlg, padding=12)
+        container.pack(fill="both", expand=True)
+
+        header = ttk.Label(
+            container,
+            text="Initialising backend data collection…",
+            font=(big_font.cget("family"), big_font.cget("size") + 1, "bold"),
+        )
+        header.pack(anchor="w", pady=(0, 8))
+
+        steps_frame = ttk.Frame(container)
+        steps_frame.pack(fill="both", expand=True)
+
+        # The 6 conceptual steps we want to show
+        self._startup_steps = [
+            "Starting backend data collection",
+            "Initialise the data backend",
+            "Initial ARP/IP-MIB/neighbor walk",
+            "Read conntrack / netstat / NetFlow",
+            "Enrich rows with MAC/vendor/labels",
+            "Waiting for data…",
+        ]
+
+        self._startup_step_labels = []
+        total = getattr(core, "startup_total_steps", 6) or 6
+
+        for idx, text in enumerate(self._startup_steps, start=1):
+            lbl = ttk.Label(
+                steps_frame,
+                text=f"{idx}/{total} {text}",
+                anchor="w",
+                font=big_font,
+            )
+            lbl.pack(anchor="w")
+            self._startup_step_labels.append(lbl)
+
+        # Let Tk compute natural size now, then centre after the dialog is mapped
+        self.update_idletasks()
+        dlg.update_idletasks()
+
+        # Start polling core for progress
+        self._update_startup_dialog()
+
+        # Centre the dialog once the WM has actually mapped it
+        dlg.after(0, self._center_startup_dialog)
+
+    def _poll_startup_progress(self):
+        """Update the 6-step dialog from MonitorCore.startup_* and auto-close when done."""
+        win = getattr(self, "_startup_win", None)
+        if not win or not win.winfo_exists():
+            return
+
+        core = getattr(self, "core", None)
+        if core is None:
+            self.after(250, self._poll_startup_progress)
+            return
+
+        total = getattr(core, "startup_total_steps", 6) or 6
+        idx = getattr(core, "startup_step_index", 0)
+        label = getattr(core, "startup_step_label", "")
+        done = getattr(core, "startup_done", False)
+        seen = getattr(self, "_startup_seen_data", False)
+
+        texts = getattr(self, "_startup_step_texts", [])
+        labels = getattr(self, "_startup_step_labels", [])
+
+        for i, lbl in enumerate(labels, start=1):
+            base = texts[i - 1] if i - 1 < len(texts) else ""
+            # For current step, prefer the dynamic label coming from core
+            current_text = label if (i == idx and label) else base
+            lbl.configure(
+                text=f"{i}/{total} {current_text}",
+                style="StartupCurrent.TLabel" if i == idx else "StartupNormal.TLabel",
+            )
+
+        # Close once backend finished AND the UI has seen first rows (from your existing logic)
+        if done and seen:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._startup_win = None
+            return
+
+        # Keep polling until we’re done
+        self.after(250, self._poll_startup_progress)
+
+    # endregion: Startup progress dialogue 
 
     # --- [HOSTNAME|UI] _on_manage_hostname_aliases -------------------------
     # Purpose: Manage hostname aliases (add/edit/delete/clear-cache)
@@ -3815,7 +4073,6 @@ class App(tk.Tk):
         # =============================================================================
         # region REFRESH.AGGREGATES (bottom) - PER-DEVICE TOTALS
 
-
             # Aggregates table
             refresh_aggregates_table(
                 self,
@@ -3864,7 +4121,46 @@ class App(tk.Tk):
 
             if hasattr(self, "status_conn"):
                 self.status_conn.set(f"Active: {active_count} | MACs: {unique_macs}")
-        except Exception:
+
+            # Simple startup indicator:
+            # - While we have no data yet, show an "initialising" message.
+            # - Once we see any rows/MACs, flip to "Ready", clear note, and
+            #   close the startup dialog if it's still open.
+            if not getattr(self, "_startup_seen_data", False):
+                if active_count > 0 or unique_macs > 0:
+                    # First data has arrived
+                    self._startup_seen_data = True
+
+                    # Update status bar
+                    if hasattr(self, "status"):
+                        self.status.set("Ready")
+                    if hasattr(self, "note") and self.note.get().startswith("Starting"):
+                        # Clear the note once we are live
+                        self.note.set("")
+
+                    # Close the startup dialog once we know we have live data
+                    dlg = getattr(self, "_startup_dialog", None)
+                    if dlg is not None:
+                        try:
+                            dlg.destroy()
+                        except Exception:
+                            pass
+                        self._startup_dialog = None
+
+                    if DEBUG:
+                        print(
+                            f"[DEBUG] _refresh_ui: first data seen - "
+                            f"Active={active_count}, MACs={unique_macs}"
+                        )
+                else:
+                    # Still waiting for the first successful core cycle
+                    if hasattr(self, "status"):
+                        self.status.set(
+                            "Initialising… waiting for router/conntrack data"
+                        )
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] _refresh_ui status block error: {e}")
             # Don't let status failures kill the UI
             pass
 
@@ -4976,9 +5272,7 @@ def import_vendor_enrichment(
     """
     return 0
 
-
 # endregion VENDOR RESOLVER (shared core + UI)
-# =============================================================================
 
 # =============================================================================
 # SECTION: ENTRY POINT (main guard)
