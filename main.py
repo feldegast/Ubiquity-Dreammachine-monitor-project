@@ -12,13 +12,9 @@ import os
 import queue
 import re
 import socket
-import struct
 import sys
 import threading
-import time
 import webbrowser
-
-
 
 from ui_tables import (
     COL_W_FIRST,
@@ -55,14 +51,8 @@ from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Iterable, Dict, Optional
-from tkinter import filedialog
 
-
-from collections import defaultdict
 from collectors import NetflowV5Collector, ConntrackCollectorSSH
-
-# ---- Vendor lookup (optional) ----
-from mac_vendor_lookup import VendorNotFoundError
 
 # =============================================================================
 # SECTION: MODULE LINKING (Vendor Resolver → monitor_core)
@@ -93,8 +83,8 @@ from helpers.alias_manager import AliasManager  # moved to helpers.alias_manager
 
 #App name and version information
 APP_NAME = "Ubiquiti SNMP + NetFlow Monitor (LAN → WAN)"
-VERSION = "6.2.0"
-VERSION_DATE = "2025.11.29"
+VERSION = "6.2.1"
+VERSION_DATE = "2025.12.01"
 
 #uaser data defaults
 ENABLE_CONNTRACK_SSH = True   # ← make sure this is here and not commented out
@@ -186,9 +176,6 @@ try:
 except Exception:
     _TOASTER = None
 # end Windows toast
-
-# Regex for splitting host:port strings
-_SPLIT_RE = re.compile(r"[,\|\t ]+")
 
 # endregion IMPORTS & GLOBALS
 
@@ -4431,17 +4418,20 @@ class App(tk.Tk):
 
     # --- [UI|COPY|DEBUG] _copy_debug_bundle ------------------------------------
     def _copy_debug_bundle(self):
-        # Build a single text payload with:
-        # - Environment info (versions, SNMP backend, config)
-        # - Active connections (top N)  → now using App._display_name()
-        # - Connected devices summary   → one line per MAC using App._display_name()
-        #
-        # All text is tab-separated for easy pasting into a text editor / Excel.
+        """
+        Copy a multi-section debug bundle to the clipboard.
 
+        Sections:
+          1) Environment / config
+          2) Active connections (top N)
+          3) Connected devices summary (via App._display_name)
+          4) Tail of the debug log
+        """
+        
         parts: list[str] = []
 
         # =============================================================================
-        # 1) Environment block (unchanged)
+        # 1) Environment / config
         # =============================================================================
         try:
             import platform, sys as _sys
@@ -4449,6 +4439,7 @@ class App(tk.Tk):
                 from importlib import metadata as _md
             except Exception:
                 _md = None
+
             puresnmp_ver = "unknown"
             if _md:
                 try:
@@ -4476,182 +4467,217 @@ class App(tk.Tk):
             # Environment info is nice-to-have only – ignore failures.
             pass
 
-        # =============================================================================
-        # 2) Active connections (via core, normalized), now using _display_name
-        # =============================================================================
-        header = [
-            "Local",
-            "MAC",
-            "Vendor/Host (via _display_name)",
-            "Remote",
-            "State",
-            "First Seen",
-            "Last Seen",
-            "Bytes (TX)",
-            ">1MB?",
-        ]
-        rows = ["\t".join(header)]
+        core = getattr(self, "core", None)
 
-        def _fmt_local(rec: dict) -> str:
-            lip = rec.get("local_ip") or rec.get("src_ip") or ""
-            lpt = rec.get("local_port") or rec.get("src_port")
-            return f"{lip}:{lpt}" if lip and lpt is not None else str(lip)
-
-        def _fmt_remote(rec: dict) -> str:
-            rip = rec.get("remote_ip") or rec.get("dst_ip") or ""
-            rpt = rec.get("remote_port") or rec.get("dst_port")
-            host = rec.get("remote_host") or rec.get("rdns") or rec.get("hostname")
-            host_part = f" [{host}]" if host else ""
-            base = f"{rip}{host_part}"
-            return f"{base}:{rpt}" if rip and rpt is not None else base
-
-        def _fmt_bytes(n) -> str:
+        # Small helpers shared by sections 2 & 3
+        def _safe_rows_from_core(limit: int) -> list[dict]:
+            if core is None:
+                return []
+            getter = getattr(core, "get_active_rows_prepared", None)
             try:
-                return str(int(n))
+                if callable(getter):
+                    return getter(limit=limit)
+                # Fallback: raw conn_map
+                return list(core.conn_map.values())[:limit]
             except Exception:
-                return str(n or 0)
-
-        # Let core normalize the rows first
-        recs = self.core.get_active_rows_prepared(limit=COPY_LIMIT_ROWS)
-        for rec in recs:
-            local = _fmt_local(rec)
-            mac = rec.get("local_mac") or ""
-            vendor_raw = rec.get("vendor") or "Unknown"
-
-            # NEW: use the same logic as the UI details panel / tables
-            # so DNS / alias / DHCP hostname are included if available.
-            try:
-                vendor_disp = self._display_name(
-                    rec.get("local_ip") or rec.get("src_ip"),
-                    mac,
-                    vendor_raw,
-                )
-            except Exception:
-                vendor_disp = vendor_raw
-
-            remote = _fmt_remote(rec)
-            state = rec.get("state") or rec.get("tcp_state") or ""
-            first_seen = rec.get("first_seen") or ""
-            last_seen = rec.get("last_seen") or ""
-            raw_bytes = rec.get("bytes") or rec.get("bytes_tx") or 0
-            btx = _fmt_bytes(raw_bytes)
-            over = (
-                "Yes"
-                if isinstance(raw_bytes, (int, float)) and raw_bytes >= ALERT_THRESHOLD_BYTES
-                else "No"
-            )
-
-            rows.append(
-                "\t".join(
-                    [
-                        local,
-                        mac,
-                        vendor_disp or vendor_raw or "Unknown",
-                        remote,
-                        str(state),
-                        str(first_seen),
-                        str(last_seen),
-                        btx,
-                        over,
-                    ]
-                )
-            )
-
-        parts.append(
-            "=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS)
-            + "\n".join(rows)
-            + "\n"
-        )
+                return []
 
         # =============================================================================
-        # 3) Connected devices summary (one line per MAC) using _display_name
+        # 2) Active connections snapshot (top N)
         # =============================================================================
         try:
-            core = self.core
-        except Exception:
-            core = None
+            header = [
+                "Local",
+                "MAC",
+                "Vendor/Host (via _display_name)",
+                "Remote",
+                "State",
+                "First Seen",
+                "Last Seen",
+                "Bytes (TX)",
+                ">1MB?",
+            ]
+            rows = ["\t".join(header)]
 
-        if core is not None:
-            # mac_norm -> set of IPs
-            mac_to_ips: dict[str, set[str]] = {}
+            def _fmt_local(rec: dict) -> str:
+                lip = rec.get("local_ip") or rec.get("src_ip") or ""
+                lpt = rec.get("local_port") or rec.get("src_port")
+                return f"{lip}:{lpt}" if lip and lpt is not None else str(lip)
 
-            # 3a) Devices from ARP / ip2mac
-            for ip, mac in getattr(core, "ip2mac", {}).items():
-                mac_norm = normalize_mac(mac or "")
-                if not mac_norm:
-                    continue
-                mac_to_ips.setdefault(mac_norm, set()).add(ip)
+            def _fmt_remote(rec: dict) -> str:
+                rip = rec.get("remote_ip") or rec.get("dst_ip") or ""
+                rpt = rec.get("remote_port") or rec.get("dst_port")
+                host = rec.get("remote_host") or rec.get("rdns") or rec.get("hostname")
+                host_part = f" [{host}]" if host else ""
+                base = f"{rip}{host_part}"
+                return f"{base}:{rpt}" if rip and rpt is not None else base
 
-            # 3b) Devices from aggregates
-            for mac in getattr(core, "aggregates", {}).keys():
-                mac_norm = normalize_mac(mac or "")
-                if not mac_norm:
-                    continue
-                mac_to_ips.setdefault(mac_norm, set())
+            def _fmt_bytes(n):
+                try:
+                    return str(int(n))
+                except Exception:
+                    return str(n or 0)
 
-            # 3c) Devices seen in the active rows we just used
-            for rec in recs:
-                mac_norm = normalize_mac(rec.get("local_mac") or "")
-                if not mac_norm:
-                    continue
-                ip = rec.get("local_ip") or rec.get("src_ip") or ""
-                if ip:
-                    mac_to_ips.setdefault(mac_norm, set()).add(ip)
-
-            if mac_to_ips:
-                dev_header = ["MAC", "IP(s)", "DisplayName (App._display_name)", "Status"]
-                dev_rows = ["\t".join(dev_header)]
-
-                for mac_norm in sorted(mac_to_ips.keys()):
-                    ips = sorted(mac_to_ips[mac_norm])
-                    primary_ip = ips[0] if ips else None
-
-                    # Use the same helper as the right-hand panel / tables.
-                    try:
-                        name = self._display_name(primary_ip, mac_norm)
-                    except Exception as e:
-                        name = f"(error from _display_name: {e})"
-
-                    # Optional: vendor status (unknown / laa / known / labelled)
-                    status = ""
-                    try:
-                        if hasattr(self, "_vendor_status_for_mac"):
-                            status = self._vendor_status_for_mac(mac_norm)
-                    except Exception:
-                        status = ""
-
-                    dev_rows.append(
+            # Preferred: what the user actually sees in the Active table
+            items = []
+            try:
+                items = list(self.tree.get_children())[:COPY_LIMIT_ROWS]
+                for iid in items:
+                    vals = self.tree.item(iid)["values"]
+                    rows.append("\t".join(str(v) for v in vals))
+            except Exception:
+                # Fallback: pull from core directly
+                recs = _safe_rows_from_core(COPY_LIMIT_ROWS)
+                for rec in recs:
+                    local = _fmt_local(rec)
+                    mac = rec.get("local_mac") or rec.get("mac") or ""
+                    # old-style vendor field (still useful)
+                    vendor = rec.get("vendor") or "Unknown"
+                    remote = _fmt_remote(rec)
+                    state = rec.get("state") or rec.get("tcp_state") or ""
+                    first_seen = rec.get("first_seen") or ""
+                    last_seen = rec.get("last_seen") or ""
+                    raw_bytes = rec.get("bytes") or rec.get("bytes_tx") or 0
+                    btx = _fmt_bytes(raw_bytes)
+                    over = (
+                        "Yes"
+                        if isinstance(raw_bytes, (int, float)) and raw_bytes >= 1_048_576
+                        else "No"
+                    )
+                    rows.append(
                         "\t".join(
                             [
-                                mac_norm,
-                                ", ".join(ips) if ips else "-",
-                                name or "",
-                                status,
+                                local,
+                                mac,
+                                vendor,
+                                remote,
+                                state,
+                                str(first_seen),
+                                str(last_seen),
+                                btx,
+                                over,
                             ]
                         )
                     )
 
-                parts.append(
-                    "=== Connected Devices (via _display_name) ===\n"
-                    + "\n".join(dev_rows)
-                    + "\n"
+            parts.append(
+                "=== Active Connections (top {}) ===\n".format(COPY_LIMIT_ROWS)
+                + "\n".join(rows)
+            )
+        except Exception:
+            # Don’t let debug-copy kill the app
+            pass
+
+        # =============================================================================
+        # 3) Connected devices summary (one line per MAC, via _display_name)
+        # =============================================================================
+        try:
+            core = getattr(self, "core", None)
+            if core is not None:
+                from vendor_resolver import _normalize_mac as normalize_mac
+
+                # mac_norm -> set of IPs
+                mac_to_ips: dict[str, set[str]] = {}
+
+                # 3a) Devices from ARP / ip2mac
+                for ip, mac in getattr(core, "ip2mac", {}).items():
+                    mac_norm = normalize_mac(mac or "")
+                    if not mac_norm:
+                        continue
+                    mac_to_ips.setdefault(mac_norm, set()).add(ip)
+
+                # 3b) Devices from aggregates (even if no current connection)
+                for mac in getattr(core, "aggregates", {}).keys():
+                    mac_norm = normalize_mac(mac or "")
+                    if not mac_norm:
+                        continue
+                    mac_to_ips.setdefault(mac_norm, set())
+
+                # 3c) Devices seen in the active rows we just used
+                try:
+                    recs = core.get_active_rows_prepared(limit=COPY_LIMIT_ROWS)
+                except Exception:
+                    recs = []
+
+                for rec in recs:
+                    mac_norm = normalize_mac(rec.get("local_mac") or rec.get("mac") or "")
+                    if not mac_norm:
+                        continue
+                    ip = rec.get("local_ip") or rec.get("src_ip") or ""
+                    if ip:
+                        mac_to_ips.setdefault(mac_norm, set()).add(ip)
+
+                if mac_to_ips:
+                    dev_header = ["MAC", "IP(s)", "DisplayName (App._display_name)", "Status"]
+                    dev_rows = ["\t".join(dev_header)]
+
+                    for mac_norm in sorted(mac_to_ips.keys()):
+                        ips = sorted(mac_to_ips.get(mac_norm) or [])
+                        primary_ip = ips[0] if ips else None
+
+                        # Use the same display logic as the UI (includes aliases / DHCP / DNS)
+                        try:
+                            name = self._display_name(primary_ip, mac_norm, None)
+                        except Exception as e:
+                            name = f"(error from _display_name: {e})"
+
+                        # Optional: vendor status (labelled / known / laa / unknown)
+                        status = ""
+                        try:
+                            if hasattr(self, "_vendor_status_for_mac"):
+                                status = self._vendor_status_for_mac(mac_norm)
+                        except Exception:
+                            status = ""
+
+                        dev_rows.append(
+                            "\t".join(
+                                [
+                                    mac_norm,
+                                    ", ".join(ips) if ips else "-",
+                                    name or "",
+                                    status or "",
+                                ]
+                            )
+                        )
+
+                    parts.append(
+                        "=== Connected Devices (via _display_name) ===\n"
+                        + "\n".join(dev_rows)
+                        + "\n"
+                    )
+        except Exception:
+            # Safe to ignore; bundle is still useful without this section
+            pass
+
+        # =============================================================================
+        # 4) Tail of debug log
+        # =============================================================================
+        try:
+            log_tail = tail_file(LOG_FILENAME, DEBUG_LOG_TAIL_LINES)
+            if log_tail:
+                parts.append("=== Debug log tail ===\n" + log_tail)
+        except Exception:
+            pass
+
+        # =============================================================================
+        # Final: join and copy to clipboard
+        # =============================================================================
+        blob = "\n\n".join(p for p in parts if p)
+
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(blob)
+            if hasattr(self, "status"):
+                self.status.set("Debug bundle copied to clipboard")
+        except Exception:
+            # As a last resort, show an error dialog
+            try:
+                messagebox.showerror(
+                    "Copy failed",
+                    "Could not copy the debug bundle to the clipboard.",
                 )
-
-        # =============================================================================
-        # 4) (Optional) You can still add tails of log files etc. here later
-        # =============================================================================
-        # Example (left commented so we don't change behaviour without you opting in):
-        #
-        # log_tail = tail_file(LOG_FILENAME, DEBUG_LOG_TAIL_LINES)
-        # if log_tail:
-        #     parts.append("=== Tail of traffic log ===\n" + log_tail + "\n")
-        #
-        # alert_tail = tail_file(ALERT_LOG_FILENAME, DEBUG_LOG_TAIL_LINES)
-        # if alert_tail:
-        #     parts.append("=== Tail of alert log ===\n" + alert_tail + "\n")
-
-        # Final clipboard copy
-        self._copy_to_clipboard("\n".join(parts), "Debug bundle copied")
+            except Exception:
+                pass
 
     # --- [UI|TEXT] _display_name ----------------------------------------------
     def _display_name(self, local_ip: str | None, mac: str | None, vendor: str | None = None) -> str:
@@ -5118,39 +5144,6 @@ def _normalize_oui_text(s: str) -> str:
     hexonly = hexonly[:6]
     return ":".join([hexonly[i:i+2] for i in range(0, 6, 2)])
 
-# --- [] _parse_vendor_lines --------------------------------------
-def _parse_vendor_lines(lines: Iterable[str]) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("//"):
-            continue
-        parts = _SPLIT_RE.split(line, maxsplit=1)
-        if not parts:
-            continue
-        oui = _normalize_oui_text(parts[0])
-        vendor = (parts[1].strip() if len(parts) > 1 else "").strip()
-        if not oui and len(parts) > 1:
-            oui = _normalize_oui_text(parts[1])
-            vendor = parts[0].strip()
-        if oui and vendor:
-            out.setdefault(oui, vendor)
-    return out
-
-# --- [] _is_locally_admin --------------------------------------
-def _is_locally_admin(mac: str) -> bool:
-    """
-    True if the MAC is locally administered (randomized) — i.e., U/L bit set.
-    """
-    mac_norm = normalize_mac(mac)
-    if len(mac_norm) != 17:
-        return False
-    first_octet_hex = mac_norm[:2]
-    try:
-        first_octet = int(first_octet_hex, 16)
-        return bool(first_octet & 0x02)
-    except ValueError:
-        return False
 
 # =============================================================================
 # SECTION: VENDOR RESOLVER (shared core + UI)
