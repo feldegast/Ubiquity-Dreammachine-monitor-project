@@ -122,7 +122,6 @@ from app_paths import (
 
 # endregion FILE PATH CONSTANTS
 
-
 # Global instance used by all UI + core display functions
 _ALIASES = AliasManager(
     ip_path=HOST_ALIAS_PATH,
@@ -494,9 +493,9 @@ def snmp_sanity():
 # region: NETWORK CORE
 
 # =============================================================================
-# SECTION: SNMP backend selection & helpers
+# SECTION: NETWORK CORE - SNMP backend selection & helpers
 # =============================================================================
-# region SNMP backend selection & helpers
+# region NETWORK CORE - SNMP backend selection & helpers
 
 # --- SNMP backend globals (module-level) ---
 _snmp_backend = None
@@ -569,12 +568,12 @@ def snmp_walk(host, community, oid):
 
 monitor_core.snmp_walk = snmp_walk
 
-# endregion SNMP backend selection & helpers
+# endregion NETWORK CORE - SNMP backend selection & helpers
 
 # =============================================================================
-# SUBSECTION: ARP/IP-MIB parsing & UI prep
+# SUBSECTION: NETWORK CORE - ARP/IP-MIB parsing & UI prep
 # =============================================================================
-# region ARP/IP-MIB parsing & UI prep
+# region NETWORK CORE - ARP/IP-MIB parsing & UI prep
 
 # numeric OIDs (no MIB files needed)
 OID_ifName                  = "1.3.6.1.2.1.31.1.1.1.1"      # IF-MIB::ifName
@@ -735,7 +734,8 @@ monitor_core.OID_atPhysAddress                = OID_atPhysAddress
 monitor_core.snmp_walk = snmp_walk
 monitor_core.walk_tcp_connections = walk_tcp_connections
 monitor_core.DEBUG = DEBUG
-# endregion ARP/IP-MIB parsing & UI prep
+# endregion NETWORK CORE - ARP/IP-MIB parsing & UI prep
+
 # endregion: NETWORK CORE
 
 # =============================================================================
@@ -804,7 +804,6 @@ def tail_file(path: str, max_lines: int) -> str:
 # SECTION: AGGREGATION (flows, bytes, top-N)
 # =============================================================================
 # region AGGREGATION
-    
 # endregion AGGREGATION
 
 _dns_lock = threading.Lock()
@@ -1775,6 +1774,11 @@ class App(tk.Tk):
         y = max(0, (sh - h) // 2 + offset_y)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
+    # =============================================================================
+    # SECTION: Startup dialogue
+    # =============================================================================
+    # region: Startup dialogue
+    
     # --- [UI|STARTUP] update dialog from MonitorCore --------------------
     def _update_startup_dialog(self):
         """
@@ -1824,7 +1828,7 @@ class App(tk.Tk):
         # Keep polling until someone (refresh_ui) closes the dialog
         self.after(250, self._update_startup_dialog)
 
-
+    # --- [UI|STARTUP] _center_startup_dialog -----------------------------
     def _center_startup_dialog(self):
         """Center the startup dialog after it has been mapped."""
         dlg = getattr(self, "_startup_dialog", None)
@@ -2010,8 +2014,7 @@ class App(tk.Tk):
 
         # Keep polling until we’re done
         self.after(250, self._poll_startup_progress)
-
-    # endregion: Startup progress dialogue 
+    # endregion: Startup dialogue
 
     # --- [HOSTNAME|UI] _on_manage_hostname_aliases -------------------------
     # Purpose: Manage hostname aliases (add/edit/delete/clear-cache)
@@ -2712,8 +2715,6 @@ class App(tk.Tk):
     # SECTION: UI CONTROLLER (events, handlers, refresh loop)
     # =============================================================================
     # region UI CONTROLLER
-
-    # --- [HELPERS|ALIAS/VENDOR LABELS] -----------------------------------------
     
     # --- [UI|DPI] _auto_dpi_scaling ------------------------------------
     def _auto_dpi_scaling(self) -> None:
@@ -2956,7 +2957,6 @@ class App(tk.Tk):
             host = None
         return f"{remote_ip} [{host}]:{remote_port}" if host else f"{remote_ip}:{remote_port}"
 
-    
     # =============================================================================
     # SECTION:Local MAC labels: get / set helpers
     # =============================================================================
@@ -3098,7 +3098,6 @@ class App(tk.Tk):
 
         # Nothing else matched → unknown
         return "unknown"
-        # endregion 3) Fallback: vendor-based classification
 
     # --- [UI|HOSTNAMES] _router_hostname_for_ip ------------------------------
     def _router_hostname_for_ip(self, ip: str | None) -> str:
@@ -5144,7 +5143,6 @@ def _normalize_oui_text(s: str) -> str:
     hexonly = hexonly[:6]
     return ":".join([hexonly[i:i+2] for i in range(0, 6, 2)])
 
-
 # =============================================================================
 # SECTION: VENDOR RESOLVER (shared core + UI)
 # =============================================================================
@@ -5163,7 +5161,6 @@ from typing import Optional
 # Here we just expose thin wrappers so the rest of the app
 # (core + UI) always goes through the same resolver.
 
-
 def vendor_for_mac(mac: Optional[str]) -> str:
     """
     Unified vendor lookup used by the whole app.
@@ -5172,7 +5169,6 @@ def vendor_for_mac(mac: Optional[str]) -> str:
     vendor name (no special tagging of locally administered addresses).
     """
     return vendor_resolver.vendor_for_mac(mac)
-
 
 def vendor_for_display(mac: Optional[str]) -> str:
     """
@@ -5184,13 +5180,11 @@ def vendor_for_display(mac: Optional[str]) -> str:
     """
     return vendor_resolver.vendor_for_display(mac)
 
-
 # Make the monitoring core use the exact same resolver.
 # monitor_core imports vendor_for_mac as a callable at module scope.
 import monitor_core
 
 monitor_core.vendor_for_mac = vendor_for_mac
-
 
 # --- JSON export / import stubs (legacy menu items) --------------------------
 #
@@ -5211,7 +5205,6 @@ def export_vendor_enrichment(path: str | Path | None = None) -> int:
     'Exported 0 entries' without crashing.
     """
     return 0
-
 
 def import_vendor_enrichment(
     path: str | Path | None = None,
