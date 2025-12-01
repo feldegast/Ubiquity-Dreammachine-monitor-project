@@ -179,19 +179,6 @@ try:
 except Exception:
     paramiko = None
 
-# Optional offline fallback (does not hit network)
-try:
-    from manuf import manuf  # pip install manuf
-    _MANUF = manuf.MacParser(update=False)
-except Exception:
-    _MANUF = None
-    
-# Safe, dependency-tolerant imports
-try:
-    from manuf import manuf as _manuf_mod  # pip install manuf
-except Exception:
-    _manuf_mod = None
-
 # Windows toast
 try:
     from win10toast import ToastNotifier
@@ -369,25 +356,6 @@ def save_mac_labels(labels: dict[str, str]) -> None:
     except Exception:
         # Fail silently – UI should keep working even if write fails
         pass
-    
-# --- [NET] _norm_mac ----------------------------------------
-def _norm_mac(mac: str) -> str:
-    if not mac:
-        return ""
-    mac = mac.strip().upper().replace("-", ":")
-    parts = [p for p in mac.split(":") if p]
-    # force 6 bytes if possible
-    if len(parts) >= 6:
-        parts = parts[:6]
-    return ":".join(parts)
-
-# --- [NET] _mac_oui ----------------------------------------
-def _mac_oui(mac: str) -> str:
-    mac_norm = _norm_mac(mac)
-    parts = mac_norm.split(":")
-    if len(parts) < 3:
-        return ""
-    return ":".join(parts[:3])  # "AA:BB:CC"
 
 # endregion: MAC LABEL STORAGE (local labels / overrides)
 
@@ -803,10 +771,6 @@ def dns_worker(dns_q: "queue.Queue[str]"):
             _dns_cache[ip] = name  # may be None
             _dns_pending.discard(ip)
 
-# --- [UTIL|FORMAT] ip_to_str ------------------------------------
-def ip_to_str(ip_int):
-    return socket.inet_ntoa(struct.pack("!I", ip_int))
-
 # --- [DNS|UTIL] _rdns_lookup ------------------------------------
 # Purpose: Bound reverse DNS via worker thread, cached
 def _rdns_lookup(ip: str, timeout: float) -> str | None:
@@ -841,11 +805,6 @@ def tail_file(path: str, max_lines: int) -> str:
         return ""
 
 # endregion UTILITIES - DNS / rDNS / utilities
-
-# ---- NetFlow v5 collector (simple, fixed-format parser) ----
-# NetFlow v5 packet format reference
-NFV5_HEADER_FMT = "!HHIIIIBBH"   # version(2), count(2), sys_uptime(4), unix_secs(4), unix_nsecs(4), flow_seq(4), engine_type(1), engine_id(1), sampling(2)
-NFV5_RECORD_FMT = "!IIIHHIIIIHHBBBBHHBBH"  # 48 bytes per record
 
 # =============================================================================
 # SECTION: DATA MODELS (types, dataclasses)

@@ -17,7 +17,7 @@ import queue
 import struct
 import traceback
 
-from datetime import datetime
+#from datetime import datetime
 from typing import Any, Iterable, Optional
 from collections import defaultdict
 
@@ -93,10 +93,6 @@ def _is_lan_client_ip(ip: str) -> bool:
             return ipobj.is_private
     except Exception:
         return False
-
-# --- [UTIL|FORMAT] ip_to_str ------------------------------------
-def ip_to_str(ip_int):
-    return socket.inet_ntoa(struct.pack("!I", ip_int))
 
 # --- [IP-MIB] _merge_ip2mac_from_snmp ------------------------------------
 def _merge_ip2mac_from_snmp():
