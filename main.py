@@ -168,13 +168,16 @@ try:
 except Exception:
     paramiko = None
 
-# Windows toast
+# =============================================================================
+# SECTION: Windows toast
+# =============================================================================
+# region Windows toast
 try:
     from win10toast import ToastNotifier
     _TOASTER = ToastNotifier() if ENABLE_TOASTS else None
 except Exception:
     _TOASTER = None
-# end Windows toast
+# endregion Windows toast
 
 # endregion IMPORTS & GLOBALS
 
